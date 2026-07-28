@@ -24,6 +24,13 @@ SETTING_DEFS: dict[str, tuple[str, object, str]] = {
     "supported_fwb_versions": ("csv", "16", "Supported FWB versions"),
     "supported_fhl_versions": ("csv", "4", "Supported FHL versions"),
     "max_file_size_kb": ("int", 2048, "Maximum upload size per file (KB)"),
+    "do_number_start": ("int", 5000001, "Delivery Order — เลขเริ่มต้น"),
+    "do_issued_by": ("text", "", "Delivery Order — รหัสผู้ออก (Issued By)"),
+    # Carriers differ on whether the DO's SHC column carries the master's
+    # special handling codes or only house-level ones (which Cargo-IMP FHL
+    # does not provide, leaving the column blank as on the TG sample).
+    "do_shc_source": ("choice:HOUSE,MASTER", "HOUSE",
+                      "Delivery Order — ที่มาของช่อง SHC"),
 }
 
 SEVERITIES = ("ERROR", "WARNING", "INFO")
@@ -95,6 +102,15 @@ def _validate(key: str, kind: str, raw) -> str:
         if not parts:
             raise SettingError(f"{key} must list at least one value")
         return ",".join(parts)
+    if kind == "text":
+        if len(text) > 200:
+            raise SettingError(f"{key} is too long")
+        return text
+    if kind.startswith("choice:"):
+        allowed = kind.split(":", 1)[1].split(",")
+        if text.upper() not in allowed:
+            raise SettingError(f"{key} must be one of {', '.join(allowed)}")
+        return text.upper()
     raise SettingError(f"unsupported setting type: {kind}")
 
 

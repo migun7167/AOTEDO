@@ -216,13 +216,13 @@ def _persist_parsed(conn: sqlite3.Connection, msg_id: str, p: dict,
             conn.execute(
                 """INSERT INTO fsu_status
                    (id, message_id, mawb_number, status_code, airport,
-                    flight_number, status_date, weight, weight_unit,
-                    hawb_number, raw_line, parsed_data, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    flight_number, status_date, status_time, weight,
+                    weight_unit, hawb_number, raw_line, parsed_data, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (new_id(), msg_id, ev.get("mawbNumber"), ev.get("statusCode"),
                  ev.get("airport"), ev.get("flightNumber"), ev.get("date"),
-                 ev.get("weight"), ev.get("weightUnit"), ev.get("hawbNumber"),
-                 ev.get("rawLine"), json.dumps(ev), ts))
+                 ev.get("time"), ev.get("weight"), ev.get("weightUnit"),
+                 ev.get("hawbNumber"), ev.get("rawLine"), json.dumps(ev), ts))
     return mawbs
 
 

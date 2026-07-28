@@ -19,6 +19,8 @@ SAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "samples")
 
 @pytest.fixture(scope="module")
 def client():
+    os.environ["PAPERLESS_AOT_DB"] = os.path.join(
+        os.path.dirname(__file__), "test_api.db")
     if os.path.exists(os.environ["PAPERLESS_AOT_DB"]):
         os.remove(os.environ["PAPERLESS_AOT_DB"])
     from app.database import db, init_db
@@ -445,6 +447,61 @@ def test_batch_detail(client, seeded):
     d = client.get(f"/api/v1/imports/{batch_id}").json()
     assert d["batch"]["status"] == "COMPLETED"
     assert len(d["messages"]) == 1
+
+
+def test_delivery_order_endpoints(client):
+    detail = client.get("/api/v1/matches/217-08722685").json()
+    fhl_id = detail["houses"][0]["id"]
+
+    r = client.post(f"/api/v1/matches/217-08722685/houses/{fhl_id}/do",
+                    json={"aircraftRegistration": "HSTKO", "issuedBy": "TG40441"})
+    assert r.status_code == 200
+    do = r.json()
+    assert do["hawbNumber"] == "WM26070003"
+    assert do["carrierCode"] == "TG"
+
+    html = client.get(f"/api/v1/do/{do['id']}/preview")
+    assert html.status_code == 200
+    assert "DELIVERY ORDER(CUSTOMS MANIFESTATION)" in html.text
+
+    pdf = client.get(f"/api/v1/do/{do['id']}/pdf")
+    assert pdf.content[:5] == b"%PDF-"
+
+    listed = client.get("/api/v1/do", params={"search": "WM26070003"}).json()
+    assert listed["total"] == 1
+    assert listed["items"][0]["do_number"] == do["doNumber"]
+
+    assert client.get("/api/v1/do/nonexistent/preview").status_code == 404
+    audit = client.get("/api/v1/audit",
+                       params={"eventType": "ISSUE_DELIVERY_ORDER"}).json()
+    assert audit["total"] >= 1
+
+
+def test_delivery_order_amend_is_admin_only(client):
+    detail = client.get("/api/v1/matches/217-08722685").json()
+    fhl_id = detail["houses"][0]["id"]
+    operator = as_role("operator")
+    assert operator.post(
+        f"/api/v1/matches/217-08722685/houses/{fhl_id}/do",
+        json={"amend": True}).status_code == 403
+    r = client.post(f"/api/v1/matches/217-08722685/houses/{fhl_id}/do",
+                    json={"amend": True, "customerCode": "CUST-001"}).json()
+    assert r["amended"] is True
+    assert r["customerCode"] == "CUST-001"
+
+
+def test_delivery_order_requires_operator_role():
+    viewer = as_role("viewer")
+    detail = viewer.get("/api/v1/matches/217-08722685").json()
+    fhl_id = detail["houses"][0]["id"]
+    assert viewer.post(
+        f"/api/v1/matches/217-08722685/houses/{fhl_id}/do",
+        json={}).status_code == 403
+    # but a viewer may still read and print an already issued DO
+    listed = viewer.get("/api/v1/do").json()
+    assert listed["total"] >= 1
+    assert viewer.get(
+        f"/api/v1/do/{listed['items'][0]['id']}/preview").status_code == 200
 
 
 def test_business_key_duplicate_flagged(client):

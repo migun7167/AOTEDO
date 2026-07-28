@@ -5,10 +5,14 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
-DB_PATH = os.environ.get(
-    "PAPERLESS_AOT_DB",
-    os.path.join(os.path.dirname(__file__), "..", "..", "data", "paperless_aot.db"),
-)
+DEFAULT_DB_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "paperless_aot.db")
+
+
+def db_path() -> str:
+    """Resolved at call time, not import time, so PAPERLESS_AOT_DB can be set
+    after this module is first imported (test suites do exactly that)."""
+    return os.environ.get("PAPERLESS_AOT_DB", DEFAULT_DB_PATH)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -173,6 +177,7 @@ CREATE TABLE IF NOT EXISTS fsu_status (
     airport TEXT,
     flight_number TEXT,
     status_date TEXT,
+    status_time TEXT,
     weight REAL,
     weight_unit TEXT,
     hawb_number TEXT,
@@ -262,6 +267,33 @@ CREATE TABLE IF NOT EXISTS match_history (
     performed_at TEXT NOT NULL
 );
 
+-- Delivery Orders issued to customs (one per house waybill). Stored so a
+-- reprint always carries the same DO number as the original.
+CREATE TABLE IF NOT EXISTS delivery_orders (
+    id TEXT PRIMARY KEY,
+    do_number TEXT NOT NULL UNIQUE,
+    mawb_number TEXT NOT NULL,
+    hawb_number TEXT,
+    fhl_id TEXT REFERENCES fhl_house(id),
+    station TEXT,
+    do_date TEXT,
+    customer_code TEXT,
+    consignee_name TEXT,
+    flight_number TEXT,
+    aircraft_registration TEXT,
+    landed_at TEXT,
+    expiry_at TEXT,
+    issued_by TEXT,
+    pieces INTEGER,
+    weight REAL,
+    payload TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    reprint_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (mawb_number, hawb_number)
+);
+CREATE INDEX IF NOT EXISTS idx_do_mawb ON delivery_orders(mawb_number);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,
@@ -279,8 +311,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 
 def get_connection() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    path = db_path()
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -290,6 +323,7 @@ def get_connection() -> sqlite3.Connection:
 # EXISTS", so they are applied only when missing from an existing database.
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("cargo_messages", "duplicate_type", "TEXT"),
+    ("fsu_status", "status_time", "TEXT"),
     ("matching_results", "override_status", "TEXT"),
     ("matching_results", "override_reason", "TEXT"),
     ("matching_results", "override_by", "TEXT"),

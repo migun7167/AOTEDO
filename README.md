@@ -3,6 +3,7 @@
 ระบบนำเข้าและจับคู่ข้อความ IATA Cargo-IMP (FWB / FHL / FFM / FSU) พร้อม Dashboard,
 หน้าดู Raw Data จาก database แบบ multi-condition filter สำหรับงาน analysis,
 หน้ารายละเอียดการจับคู่รายฉบับ, การจับคู่ด้วยมือ, ตั้งค่ากฎการ match ได้จากหน้าจอ
+, ออกใบ Delivery Order สำหรับศุลกากร
 และ export เป็น Excel / CSV / JSON / ไฟล์ต้นฉบับ
 
 Stack: **FastAPI + SQLite + vanilla JS SPA** — ไม่ต้องมี build step, ไม่ต้องต่อ
@@ -29,7 +30,7 @@ cd backend && python3 -m uvicorn main:app --port 8000
 รัน test:
 
 ```bash
-cd backend && python3 -m pytest tests/ -q      # 58 tests
+cd backend && python3 -m pytest tests/ -q      # 91 tests
 ```
 
 ### บัญชีเริ่มต้น
@@ -57,6 +58,9 @@ cd backend && python3 -m pytest tests/ -q      # 58 tests
 | Manual link / unlink FHL | ✓ | | |
 | Resolve / Reject (override สถานะ) | ✓ | | |
 | ตั้งค่า Matching Rule | ✓ | | |
+| ออก Delivery Order | ✓ | ✓ | |
+| แก้ไข DO ที่ออกไปแล้ว | ✓ | | |
+| พิมพ์ DO ที่ออกแล้ว | ✓ | ✓ | ✓ |
 | ดู Audit Log | ✓ | | |
 
 Session เก็บใน cookie แบบ HttpOnly อายุ 12 ชั่วโมง รหัสผ่าน hash ด้วย
@@ -104,7 +108,7 @@ airline prefix, flight, FWB version, มี/ไม่มี duplicate, ช่ว
 - **Parsed** — JSON ที่ parse ได้
 - **History** — ทุกการเปลี่ยนสถานะ
 
-**Raw Data / Analysis** — ดูตารางดิบทั้ง 11 ตารางจาก database
+**Raw Data / Analysis** — ดูตารางดิบทั้ง 12 ตารางจาก database
 - ต่อเงื่อนไขได้ไม่จำกัด รวมแบบ **AND หรือ OR**
 - operator: `= ≠ contains starts-with > ≥ < ≤ is-empty not-empty`
 - ช่องกรอกค่ามี dropdown แนะนำค่าที่มีจริงในคอลัมน์นั้น (พร้อมจำนวนแถว)
@@ -112,6 +116,9 @@ airline prefix, flight, FWB version, มี/ไม่มี duplicate, ช่ว
 - **Group by** — สรุป COUNT / SUM / AVG / MIN / MAX ตามคอลัมน์ใดก็ได้
   โดยใช้ filter ชุดเดียวกับตาราง
 - Export CSV ตาม filter ปัจจุบัน
+
+**Delivery Orders** — ออกใบ DO (Delivery Order / Customs Manifestation) จากข้อมูลที่
+match ได้ ดูรายละเอียดหัวข้อถัดไป
 
 **Errors** — ไฟล์ที่ parse ไม่สำเร็จ, validation rule ที่ไม่ผ่าน (คลิกไปหน้ารายละเอียดได้)
 และรายการข้อความซ้ำ
@@ -145,7 +152,8 @@ backend/
       auth.py                PBKDF2, session, RBAC dependency
       settings_service.py    matching rule ที่ปรับได้จากหน้าจอ
       export_service.py      Excel / CSV / JSON / raw zip
-  tests/                     58 tests (parser, matching, API, RBAC)
+      do_service.py          Delivery Order — mapping, Code 39, HTML และ PDF
+  tests/                     91 tests (parser, matching, API, RBAC, DO)
 frontend/                    index.html + css/ + js/app.js + fonts/ (self-hosted)
 scripts/seed.py              โหลดข้อมูลตัวอย่าง
 scripts/fetch_fonts.py       ดาวน์โหลด web font มาเก็บในโปรเจกต์
@@ -196,6 +204,40 @@ Administrator link/unlink house ได้จากแท็บ Houses โดย�
 ถ้า link house ที่ MAWB ต่างกัน กฎ `MAWB_MATCH` จะขึ้น FAIL ตามความจริง
 ไม่ถูกกลบ และ house นั้นจะติดป้าย MANUAL ในตาราง
 
+## Delivery Order
+
+DO เป็นเอกสารระดับ house — หนึ่งใบต่อหนึ่ง HAWB ออกได้จากปุ่ม **🧾 สร้าง DO**
+ในแท็บ Houses ของหน้ารายละเอียด MAWB
+
+ทุกช่องบนเอกสารเติมจากข้อมูลที่ match มาแล้ว:
+
+| ช่องบน DO | มาจาก |
+|---|---|
+| บาร์โค้ด + เลขใต้บาร์โค้ด | HAWB (Code 39 วาดเองใน SVG/PDF ไม่ต้องใช้ library ภายนอก) |
+| Station | เมืองของสนามบินปลายทาง (BKK → BANGKOK) |
+| CNEE + ที่อยู่ | consignee จาก FHL พร้อมรหัสไปรษณีย์และชื่อประเทศ |
+| Air Waybill No | MAWB (ไม่มีขีด) และ HAWB |
+| Pieces / Weight | ของ house เทียบกับของ master — `1 of 1`, `149 of 149K` |
+| Brd. Pnt / Off. Pnt | origin / destination |
+| Flight No | เที่ยวบินจาก FWB เติมศูนย์เป็น 4 หลัก (TG601 → TG0601) |
+| Landed on Date/ATA | FSU เหตุการณ์ RCF หรือ ARR (เลือกใบที่มีเวลานาฬิกาก่อน) |
+| Date and time of expiry | ATA + 48 ชั่วโมง |
+| Nature of Goods | commodity จาก FHL |
+| ชื่อสายการบิน + ข้อความท้ายเอกสาร | จาก airline prefix (217 → Thai Airways) |
+
+สามช่องที่ข้อความ Cargo-IMP ไม่มีข้อมูลให้ ระบบจะถามในกล่องก่อนออกเอกสาร:
+**Aircraft Registration**, **Customer Code** และ **ATA** (กรณี FSU ส่งมาแต่วันที่ไม่มีเวลา)
+
+เลข DO เดินอัตโนมัติจากค่าเริ่มต้นที่ตั้งในหน้า Settings เอกสารที่ออกแล้วถูกเก็บไว้
+กดออกซ้ำจะได้**เลขเดิม**พร้อมลายน้ำ REPRINT ถ้าข้อมูลผิดจริง ๆ Administrator
+ติ๊ก "แก้ไข DO ที่ออกไปแล้ว" เพื่อเขียนทับเนื้อหาโดยคงเลขเดิมได้ (บันทึก audit log ทุกครั้ง)
+
+ผลลัพธ์เลือกได้สองแบบ: **หน้าพิมพ์ HTML** (สั่ง Print → Save as PDF จากเบราว์เซอร์
+ได้ทุกเครื่อง) หรือ **ดาวน์โหลด PDF** ขนาด A4 ที่ระบบสร้างเอง
+
+ช่อง SHC บนเอกสารต้นแบบเว้นว่าง ระบบจึงเว้นว่างเป็นค่าเริ่มต้น (`do_shc_source = HOUSE`)
+ถ้าต้องการให้พิมพ์ SPH ของใบแม่ (เช่น HEA SPX) เปลี่ยนเป็น `MASTER` ในหน้า Settings
+
 ## Duplicate
 
 - **Exact** — SHA-256 ของ raw message ตรงกัน → สถานะ `DUPLICATE`
@@ -224,6 +266,9 @@ Administrator link/unlink house ได้จากแท็บ Houses โดย�
 | DELETE | `/api/v1/matches/{mawb}/houses/{id}/link` | ล้าง override | admin |
 | GET | `/api/v1/houses/unassigned` | house ที่เลือก link ได้ | ทุกบทบาท |
 | GET | `/api/v1/dashboard/summary` | ตัวเลขทั้งหมดของ dashboard | ทุกบทบาท |
+| POST | `/api/v1/matches/{mawb}/houses/{id}/do` | ออก / พิมพ์ซ้ำ / แก้ไข DO | admin, operator (แก้ไข = admin) |
+| GET | `/api/v1/do` | รายการ DO ที่ออกแล้ว | ทุกบทบาท |
+| GET | `/api/v1/do/{id}/preview` \| `/pdf` | หน้าพิมพ์ HTML / ไฟล์ PDF | ทุกบทบาท |
 | GET | `/api/v1/errors` \| `/history` | หน้า Errors / History | ทุกบทบาท |
 | GET | `/api/v1/audit` | audit log | admin |
 | GET/PUT | `/api/v1/settings` | อ่าน/แก้ matching rule | อ่านทุกบทบาท, แก้ admin |

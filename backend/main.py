@@ -16,7 +16,7 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.dirname(__file__))
 
 from app.database import db, init_db  # noqa: E402
-from app.services import export_service, settings_service  # noqa: E402
+from app.services import do_service, export_service, settings_service  # noqa: E402
 from app.services import import_service as svc  # noqa: E402
 from app.services.auth import (  # noqa: E402
     ADMIN, OPERATOR, SESSION_COOKIE, VIEWER, ensure_default_users, require,
@@ -456,6 +456,104 @@ def unassigned_houses(search: str = "", limit: int = 50,
     return {"items": [dict(r) for r in rows]}
 
 
+# -------------------------------------------------------- delivery orders ---
+
+class DOBody(BaseModel):
+    """Fields the Cargo-IMP messages cannot supply are accepted here."""
+    landedAt: str = ""              # ISO, overrides the FSU arrival event
+    aircraftRegistration: str = ""
+    customerCode: str = ""
+    issuedBy: str = ""
+    station: str = ""
+    doDate: str = ""
+    amend: bool = False            # rewrite an issued DO, keeping its number
+
+
+@app.post("/api/v1/matches/{mawb}/houses/{fhl_id}/do")
+def create_delivery_order(mawb: str, fhl_id: str, body: DOBody, request: Request,
+                          user: dict = Depends(can_import)):
+    """Issue (or reprint) the Delivery Order for one house waybill."""
+    payload = body.model_dump()
+    amend = bool(payload.pop("amend", False))
+    overrides = {k: v for k, v in payload.items() if v}
+    if amend and user["role"] != ADMIN:
+        raise HTTPException(403, {
+            "code": "FORBIDDEN",
+            "message": "การแก้ไข DO ที่ออกไปแล้วทำได้เฉพาะ Administrator"})
+    with db() as conn:
+        settings = settings_service.get_all(conn)
+        try:
+            do = do_service.issue(
+                conn, mawb, fhl_id, user["username"], overrides,
+                number_start=settings["do_number_start"],
+                default_issued_by=settings["do_issued_by"],
+                shc_source=settings["do_shc_source"], amend=amend)
+        except do_service.DOError as e:
+            raise HTTPException(404, {"code": "DO_SOURCE_NOT_FOUND",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn,
+                  "AMEND_DELIVERY_ORDER" if do.get("amended")
+                  else "ISSUE_DELIVERY_ORDER",
+                  user["username"], "delivery_orders", do["doNumber"],
+                  after={"mawb": mawb, "hawb": do["hawbNumber"],
+                         "reprint": do.get("reprint", False),
+                         "amended": do.get("amended", False)},
+                  ip=ip, user_agent=ua)
+    return do
+
+
+@app.get("/api/v1/do")
+def list_delivery_orders(page: int = 1, pageSize: int = 50, search: str = "",
+                         user: dict = Depends(any_user)):
+    where, params = [], []
+    if search:
+        where.append("(mawb_number LIKE ? OR hawb_number LIKE ? OR do_number LIKE ?)")
+        params += [f"%{search}%"] * 3
+    wsql = ("WHERE " + " AND ".join(where)) if where else ""
+    pageSize = min(max(pageSize, 1), 200)
+    with db() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM delivery_orders {wsql}", params).fetchone()[0]
+        rows = conn.execute(
+            f"""SELECT id, do_number, mawb_number, hawb_number, station, do_date,
+                       consignee_name, flight_number, landed_at, expiry_at,
+                       issued_by, pieces, weight, created_by, created_at,
+                       reprint_count
+                FROM delivery_orders {wsql}
+                ORDER BY created_at DESC LIMIT ? OFFSET ?""",
+            params + [pageSize, (page - 1) * pageSize]).fetchall()
+    return {"page": page, "pageSize": pageSize, "total": total,
+            "items": [dict(r) for r in rows]}
+
+
+@app.get("/api/v1/do/{do_id}/preview")
+def preview_delivery_order(do_id: str, user: dict = Depends(any_user)):
+    with db() as conn:
+        try:
+            do = do_service.load(conn, do_id)
+        except do_service.DOError as e:
+            raise HTTPException(404, {"code": "NOT_FOUND", "message": str(e)})
+    return Response(do_service.render_html(do), media_type="text/html")
+
+
+@app.get("/api/v1/do/{do_id}/pdf")
+def download_delivery_order(do_id: str, request: Request,
+                            user: dict = Depends(any_user)):
+    with db() as conn:
+        try:
+            do = do_service.load(conn, do_id)
+        except do_service.DOError as e:
+            raise HTTPException(404, {"code": "NOT_FOUND", "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "EXPORT_DATA", user["username"], "delivery_orders",
+                  do["doNumber"], after={"format": "PDF"}, ip=ip, user_agent=ua)
+    filename = f"DO_{do['doNumber']}_{do.get('hawbNumber') or ''}.pdf"
+    return Response(do_service.render_pdf(do), media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             f'inline; filename="{filename}"'})
+
+
 # -------------------------------------------------------------- dashboard ---
 
 @app.get("/api/v1/dashboard/summary")
@@ -641,8 +739,13 @@ EXPLORER_TABLES: dict[str, list[str]] = {
                    "mawb_number", "pieces", "gross_weight", "weight_unit",
                    "nature_of_goods", "created_at"],
     "fsu_status": ["id", "mawb_number", "status_code", "airport", "flight_number",
-                   "status_date", "weight", "weight_unit", "hawb_number",
-                   "raw_line", "created_at"],
+                   "status_date", "status_time", "weight", "weight_unit",
+                   "hawb_number", "raw_line", "created_at"],
+    "delivery_orders": ["id", "do_number", "mawb_number", "hawb_number", "station",
+                        "do_date", "customer_code", "consignee_name",
+                        "flight_number", "aircraft_registration", "landed_at",
+                        "expiry_at", "issued_by", "pieces", "weight",
+                        "created_by", "created_at", "reprint_count"],
     "matching_results": ["id", "mawb_number", "match_status", "override_status",
                          "match_score", "fhl_count", "fwb_pieces",
                          "fhl_total_pieces", "pieces_difference", "fwb_weight",

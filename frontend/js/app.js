@@ -54,12 +54,12 @@ function toast(msg, isErr = false) {
 const routes = {
   dashboard: renderDashboard, import: renderImport, matches: renderMatches,
   rawdata: renderRawData, errors: renderErrors, history: renderHistory,
-  audit: renderAudit, settings: renderSettings,
+  audit: renderAudit, settings: renderSettings, do: renderDeliveryOrders,
 };
 const titles = {
   dashboard: "Dashboard", import: "Import Messages", matches: "Match Results",
   rawdata: "Raw Data / Analysis", errors: "Errors", history: "Match History",
-  audit: "Audit Log", settings: "Settings",
+  audit: "Audit Log", settings: "Settings", do: "Delivery Orders",
 };
 
 function navigate() {
@@ -501,7 +501,7 @@ window.openDetail = async function (mawb) {
       ${d.houses.length ? `<div class="tbl-wrap"><table class="tbl">
         <thead><tr><th>HAWB</th><th>Link</th><th>Shipper</th><th>Consignee</th><th>Commodity</th>
           <th class="num">Pieces</th><th class="num">Weight</th><th>HS Code</th><th>Tax ID</th>
-          ${isAdmin() ? "<th></th>" : ""}</tr></thead>
+          <th></th></tr></thead>
         <tbody>${d.houses.map(h => `
           <tr><td class="mono"><b>${esc(h.hawb_number)}</b></td>
             <td>${h.linked_by === "MANUAL"
@@ -514,7 +514,10 @@ window.openDetail = async function (mawb) {
             <td class="num">${fmtW(h.gross_weight)} ${esc(h.weight_unit || "")}</td>
             <td class="mono">${esc(h.hs_code || "—")}</td>
             <td class="mono">${esc(h.consignee_tax_id || "—")}</td>
-            ${isAdmin() ? `<td><button class="btn sm" onclick="event.stopPropagation();doUnlink('${esc(mawb)}','${esc(h.id)}','${esc(h.hawb_number)}')">Unlink</button></td>` : ""}
+            <td style="white-space:nowrap">
+              ${canImport() ? `<button class="btn gold sm" onclick="event.stopPropagation();openDoDialog('${esc(mawb)}','${esc(h.id)}','${esc(h.hawb_number)}')">🧾 สร้าง DO</button>` : ""}
+              ${isAdmin() ? `<button class="btn sm" onclick="event.stopPropagation();doUnlink('${esc(mawb)}','${esc(h.id)}','${esc(h.hawb_number)}')">Unlink</button>` : ""}
+            </td>
           </tr>`).join("")}
         </tbody></table></div>` : `<div class="empty">ยังไม่มี FHL สำหรับ MAWB นี้</div>`}
       ${d.unlinkedHouses?.length ? `
@@ -663,6 +666,112 @@ window.openLinkPicker = async (mawb) => {
   };
   try { await load(); } catch (e) { toast(e.message, true); }
 };
+/* ---------------- delivery order ---------------- */
+window.openDoDialog = async (mawb, fhlId, hawb) => {
+  // Prefill the ATA from the FSU arrival event when the message carried a time.
+  let landed = "";
+  try {
+    const d = await api("/matches/" + encodeURIComponent(mawb));
+    // An event carrying a clock time beats one that only has a date, whichever
+    // arrived first — a DO needs the ATA to the minute.
+    const byCode = (code) => d.fsuEvents.filter(e => e.status_code === code);
+    const ranked = [...byCode("RCF"), ...byCode("ARR")];
+    const arrival = ranked.find(e => e.status_time) || ranked[ranked.length - 1];
+    if (arrival?.status_date) {
+      const m = arrival.status_date.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
+      const months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+      if (m) {
+        const mm = String(months.indexOf(m[2]) + 1).padStart(2, "0");
+        const t = arrival.status_time
+          ? `${arrival.status_time.slice(0,2)}:${arrival.status_time.slice(2)}` : "00:00";
+        landed = `20${m[3]}-${mm}-${m[1].padStart(2, "0")}T${t}`;
+      }
+    }
+  } catch { /* the dialog still works without a prefill */ }
+
+  $("#modal-root").innerHTML = `
+    <div class="modal-back" onclick="if(event.target===this)openDetail('${esc(mawb)}')">
+      <div class="modal" style="max-width:660px">
+        <div class="modal-head"><h2>สร้าง Delivery Order — <span class="mono">${esc(hawb)}</span></h2>
+          <button class="close" onclick="openDetail('${esc(mawb)}')">✕</button></div>
+        <div class="modal-body">
+          <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
+            ทุกช่องที่เหลือดึงจากข้อมูลที่ match มาอัตโนมัติ
+            ช่องด้านล่างคือส่วนที่ข้อความ Cargo-IMP ไม่มีข้อมูลให้ กรอกเพิ่มได้ตามต้องการ
+          </p>
+          <div class="settings-grid">
+            <div class="setting-item"><div class="k">Landed on / ATA</div>
+              <input type="datetime-local" id="do-landed" value="${esc(landed)}">
+              <div class="hint">${landed ? "ดึงจาก FSU มาให้แล้ว แก้ได้" : "FSU ไม่มีเวลามาให้ — กรอกเอง"}</div></div>
+            <div class="setting-item"><div class="k">Aircraft Registration</div>
+              <input type="text" id="do-acreg" placeholder="เช่น HSTKO">
+              <div class="hint">พิมพ์ใต้หมายเลขเที่ยวบิน</div></div>
+            <div class="setting-item"><div class="k">Customer Code</div>
+              <input type="text" id="do-cust" placeholder="เว้นว่างได้">
+              <div class="hint">รหัสลูกค้าที่มารับของ</div></div>
+            <div class="setting-item"><div class="k">Issued By</div>
+              <input type="text" id="do-issuer" placeholder="เช่น TG40441">
+              <div class="hint">ถ้าเว้นว่างจะใช้ค่าจากหน้า Settings</div></div>
+          </div>
+          ${isAdmin() ? `<label class="cp-item" style="margin-top:16px">
+            <input type="checkbox" id="do-amend">
+            แก้ไข DO ที่ออกไปแล้ว (ใช้เลขเดิม เขียนทับข้อมูลด้วยค่าปัจจุบัน)</label>` : ""}
+          <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+            <button class="btn gold" id="do-create">🧾 ออก DO</button>
+            <button class="btn" onclick="openDetail('${esc(mawb)}')">ยกเลิก</button>
+            <span id="do-status" style="color:var(--muted);font-size:.85rem"></span>
+          </div>
+        </div></div></div>`;
+
+  $("#do-create").onclick = async () => {
+    $("#do-status").textContent = "กำลังออกเอกสาร…";
+    try {
+      const r = await api(
+        `/matches/${encodeURIComponent(mawb)}/houses/${fhlId}/do`,
+        jsonPost({
+          landedAt: $("#do-landed").value,
+          aircraftRegistration: $("#do-acreg").value.trim(),
+          customerCode: $("#do-cust").value.trim(),
+          issuedBy: $("#do-issuer").value.trim(),
+          amend: $("#do-amend")?.checked || false,
+        }));
+      showDoResult(mawb, r);
+      toast(r.amended ? `แก้ไข DO ${r.doNumber} แล้ว (เลขเดิม)`
+        : r.reprint ? `DO ${r.doNumber} มีอยู่แล้ว — เปิดเป็นการพิมพ์ซ้ำ`
+        : `ออก DO เลขที่ ${r.doNumber} แล้ว`);
+    } catch (e) { $("#do-status").textContent = ""; toast(e.message, true); }
+  };
+};
+
+function showDoResult(mawb, r) {
+  $("#modal-root").innerHTML = `
+    <div class="modal-back" onclick="if(event.target===this)openDetail('${esc(mawb)}')">
+      <div class="modal" style="max-width:640px">
+        <div class="modal-head"><h2>Delivery Order <span class="mono">${esc(r.doNumber)}</span></h2>
+          ${r.amended ? '<span class="badge info">แก้ไขแล้ว</span>'
+            : r.reprint ? '<span class="badge warn">REPRINT</span>'
+            : '<span class="badge ok">ออกใหม่</span>'}
+          <button class="close" onclick="openDetail('${esc(mawb)}')">✕</button></div>
+        <div class="modal-body">
+          <div class="kv">
+            ${kv("HAWB", esc(r.hawbNumber))}
+            ${kv("Station", esc(r.station))}
+            ${kv("Consignee", esc(r.consignee?.name))}
+            ${kv("Flight", esc(r.flightNumber) + (r.aircraftRegistration ? " / " + esc(r.aircraftRegistration) : ""))}
+            ${kv("Pieces", `${esc(r.pieces)} of ${esc(r.masterPieces)}`)}
+            ${kv("Weight", `${esc(r.weight)} of ${esc(r.masterWeight)}${esc(r.weightUnit)}`)}
+            ${kv("Landed / ATA", esc((r.landedAt || "—").replace("T", " ")))}
+            ${kv("หมดอายุ (48 ชม.)", esc((r.expiryAt || "—").replace("T", " ")))}
+          </div>
+          <div class="export-grid" style="margin-top:20px">
+            <button class="export-choice" onclick="window.open('${API}/do/${esc(r.id)}/preview','_blank')">
+              <b>เปิดหน้าพิมพ์</b><span>ดูบนหน้าจอ แล้วสั่งพิมพ์หรือบันทึกเป็น PDF จากเบราว์เซอร์</span></button>
+            <button class="export-choice" onclick="window.open('${API}/do/${esc(r.id)}/pdf','_blank')">
+              <b>ดาวน์โหลด PDF</b><span>ไฟล์ PDF ขนาด A4 พร้อมบาร์โค้ด HAWB</span></button>
+          </div>
+        </div></div></div>`;
+}
+
 window.doLink = async (mawb, fhlId, hawb) => {
   const reason = prompt(`เหตุผลที่ link ${hawb} เข้ากับ ${mawb}:`);
   if (reason === null) return;
@@ -918,6 +1027,66 @@ async function renderRawData(params) {
 
   drawFilters();
   drawColPicker();
+  load();
+}
+
+/* ---------------- delivery orders page ---------------- */
+async function renderDeliveryOrders(params) {
+  const state = { search: params.get("search") || "", page: 1 };
+  $("#view").innerHTML = `
+    <div class="panel">
+      <div class="filter-bar">
+        <input type="search" id="do-search" placeholder="ค้นหา DO No / MAWB / HAWB…"
+               value="${esc(state.search)}" style="width:280px">
+        <button class="btn primary sm" id="do-apply">ค้นหา</button>
+        <div class="spacer"></div>
+        <span style="color:var(--muted);font-size:.83rem">
+          ออก DO ใหม่ได้จากแท็บ Houses ในหน้ารายละเอียดของแต่ละ MAWB</span>
+      </div>
+      <div id="do-table"></div>
+    </div>`;
+
+  async function load() {
+    state.search = $("#do-search").value.trim();
+    let d;
+    try {
+      d = await api(`/do?${new URLSearchParams({ page: state.page, pageSize: 50, search: state.search })}`);
+    } catch (e) { $("#do-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    $("#do-table").innerHTML = d.items.length ? `
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>DO No</th><th>MAWB</th><th>HAWB</th><th>Consignee</th>
+          <th>Station</th><th>Flight</th><th class="num">Pcs</th><th class="num">Weight</th>
+          <th>หมดอายุ</th><th>ออกโดย</th><th>พิมพ์ซ้ำ</th><th></th></tr></thead>
+        <tbody>${d.items.map(r => `<tr>
+          <td class="mono"><b>${esc(r.do_number)}</b></td>
+          <td class="mono clickable" onclick="openDetail('${esc(r.mawb_number)}')">${esc(r.mawb_number)}</td>
+          <td class="mono">${esc(r.hawb_number)}</td>
+          <td class="trunc" title="${esc(r.consignee_name)}">${esc(r.consignee_name || "—")}</td>
+          <td>${esc(r.station || "—")}</td>
+          <td>${esc(r.flight_number || "—")}</td>
+          <td class="num">${r.pieces ?? "—"}</td>
+          <td class="num">${fmtW(r.weight)}</td>
+          <td>${esc((r.expiry_at || "—").replace("T", " "))}</td>
+          <td>${esc(r.issued_by || r.created_by || "—")}</td>
+          <td class="num">${r.reprint_count || "—"}</td>
+          <td style="white-space:nowrap">
+            <button class="btn sm" onclick="window.open('${API}/do/${esc(r.id)}/preview','_blank')">พิมพ์</button>
+            <button class="btn sm" onclick="window.open('${API}/do/${esc(r.id)}/pdf','_blank')">PDF</button>
+          </td></tr>`).join("")}
+        </tbody></table></div>
+      <div class="pager"><span>${d.total} ฉบับ</span>
+        <button class="btn sm" id="do-prev" ${state.page <= 1 ? "disabled" : ""}>←</button>
+        <span>หน้า ${state.page}</span>
+        <button class="btn sm" id="do-next" ${state.page * 50 >= d.total ? "disabled" : ""}>→</button>
+      </div>` :
+      `<div class="empty"><div class="big">🧾</div>ยังไม่มี Delivery Order —
+        เปิดหน้ารายละเอียด MAWB แล้วไปที่แท็บ Houses เพื่อออก DO</div>`;
+    const p = $("#do-prev"), n = $("#do-next");
+    if (p) p.onclick = () => { state.page--; load(); };
+    if (n) n.onclick = () => { state.page++; load(); };
+  }
+  $("#do-apply").onclick = () => { state.page = 1; load(); };
+  $("#do-search").onkeydown = (e) => { if (e.key === "Enter") { state.page = 1; load(); } };
   load();
 }
 

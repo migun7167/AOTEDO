@@ -22,7 +22,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "backend"))
 
-from app.database import DB_PATH, db, init_db  # noqa: E402
+from app.database import db, db_path, init_db  # noqa: E402
 from app.services import import_service as svc  # noqa: E402
 from app.services.auth import DEFAULT_USERS, ensure_default_users  # noqa: E402
 
@@ -51,9 +51,9 @@ def load_payloads() -> list[tuple[str, str]]:
 
 
 def main() -> None:
-    if "--reset" in sys.argv and os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-        print(f"removed {DB_PATH}")
+    if "--reset" in sys.argv and os.path.exists(db_path()):
+        os.remove(db_path())
+        print(f"removed {db_path()}")
     init_db()
 
     payloads = load_payloads()
@@ -86,7 +86,7 @@ def main() -> None:
                   f"{str(r['fwb_pieces'] or '-') + '/' + str(r['fhl_total_pieces'] or '-'):>12}"
                   f"{str(r['fwb_weight'] or '-') + '/' + str(r['fhl_total_weight'] or '-'):>18}")
 
-    print(f"\nDatabase: {os.path.abspath(DB_PATH)}")
+    print(f"\nDatabase: {os.path.abspath(db_path())}")
     print("\nบัญชีเริ่มต้น (เปลี่ยนรหัสผ่านก่อนใช้งานจริง):")
     for username, password, role, _display in DEFAULT_USERS:
         print(f"  {username:<10} / {password:<12} {role}")
