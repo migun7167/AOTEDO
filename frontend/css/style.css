@@ -89,6 +89,51 @@ code, pre, .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
   color: var(--navy-900); font-weight: 700; font-size: .8rem;
 }
 .view { padding: 26px 28px; }
+.user-chip { display: flex; align-items: center; gap: 10px; }
+.user-meta { display: flex; flex-direction: column; line-height: 1.25; }
+.user-meta span:first-child { font-size: .84rem; font-weight: 600; }
+.role-tag {
+  font-size: .62rem; font-weight: 700; letter-spacing: .5px;
+  color: var(--navy-700); text-transform: uppercase;
+}
+.nav a[hidden] { display: none; }
+
+/* ---------- Login ---------- */
+.login-back {
+  position: fixed; inset: 0; z-index: 200; display: flex;
+  align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--navy-900), var(--navy-700) 60%, #16407f);
+}
+.login-back[hidden] { display: none; }
+.login-card {
+  background: #fff; border-radius: 20px; padding: 38px 40px 30px;
+  width: min(400px, 92vw); box-shadow: 0 30px 80px rgba(0, 0, 0, .4);
+  display: flex; flex-direction: column; gap: 12px; text-align: center;
+}
+.login-card .logo { width: 62px; height: 62px; margin: 0 auto; }
+.login-card h1 { font-size: 1.5rem; font-weight: 600; }
+.login-card h1 b { color: var(--gold-500); font-weight: 800; }
+.login-card .sub {
+  font-size: .7rem; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 1px; margin-bottom: 10px;
+}
+.login-card label {
+  display: flex; flex-direction: column; gap: 5px; text-align: left;
+  font-size: .78rem; font-weight: 700; color: var(--muted);
+}
+.login-card input { padding: 11px 14px; font-size: .95rem; }
+.login-card .btn { justify-content: center; padding: 12px; margin-top: 6px; }
+.login-error {
+  color: var(--err); font-size: .82rem; min-height: 18px; font-weight: 600;
+}
+.login-hint {
+  font-size: .72rem; color: var(--muted); margin-top: 10px;
+  border-top: 1px solid var(--line); padding-top: 12px; line-height: 1.7;
+}
+.login-hint code {
+  background: var(--navy-100); padding: 2px 6px; border-radius: 5px;
+  color: var(--navy-700); font-size: .7rem;
+}
 
 /* ---------- Cards & grid ---------- */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 16px; margin-bottom: 24px; }
@@ -129,6 +174,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .87rem; }
 .tbl tbody tr:hover { background: var(--navy-100); }
 .tbl tr.clickable { cursor: pointer; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl td.trunc { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- Badges ---------- */
 .badge {
@@ -254,6 +300,30 @@ pre.jsonview { background: #fff; border: 1px solid var(--line); color: #24344d; 
   height: 10px; border-radius: 5px;
   background: linear-gradient(90deg, var(--navy-600), var(--gold-500));
 }
+
+/* ---------- Export menu ---------- */
+.export-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 620px) { .export-grid { grid-template-columns: 1fr; } }
+.export-choice {
+  text-align: left; font: inherit; cursor: pointer; padding: 15px 17px;
+  border: 1px solid var(--line); border-radius: 12px; background: #fff;
+  display: flex; flex-direction: column; gap: 5px; transition: all .13s;
+}
+.export-choice:hover { border-color: var(--gold-500); background: #fffdf5; transform: translateY(-2px); }
+.export-choice b { font-size: .95rem; color: var(--navy-700); }
+.export-choice span { font-size: .76rem; color: var(--muted); line-height: 1.45; }
+
+/* ---------- Settings ---------- */
+.settings-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px;
+}
+.setting-item {
+  border: 1px solid var(--line); border-radius: 11px; padding: 13px 15px; background: #fbfcfe;
+}
+.setting-item .k { font-size: .8rem; font-weight: 700; margin-bottom: 7px; }
+.setting-item input, .setting-item select { width: 100%; }
+.setting-item .hint { font-size: .68rem; color: var(--muted); margin-top: 6px; }
+.setting-item code { background: var(--navy-100); padding: 1px 5px; border-radius: 4px; }
 
 /* ---------- Charts ---------- */
 .chart-flex { display: flex; gap: 26px; align-items: center; flex-wrap: wrap; }

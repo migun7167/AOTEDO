@@ -27,12 +27,21 @@ const badge = (st) => {
 const fmtW = (v) => v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const fmtD = (v) => v ? v.replace("T", " ").slice(0, 16) : "—";
 
+let CURRENT_USER = null;
+const isAdmin = () => CURRENT_USER?.role === "ADMINISTRATOR";
+const canImport = () => ["ADMINISTRATOR", "OPERATOR"].includes(CURRENT_USER?.role);
+
 async function api(path, opts = {}) {
   const res = await fetch(API + path, opts);
+  if (res.status === 401 && CURRENT_USER) { showLogin("เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่"); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.message || data.code || res.statusText);
   return data;
 }
+const jsonPost = (body) => ({
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
 function toast(msg, isErr = false) {
   const el = document.createElement("div");
   el.className = "toast" + (isErr ? " err" : "");
@@ -42,12 +51,29 @@ function toast(msg, isErr = false) {
 }
 
 /* ---------------- router ---------------- */
-const routes = { dashboard: renderDashboard, import: renderImport, matches: renderMatches, rawdata: renderRawData };
-const titles = { dashboard: "Dashboard", import: "Import Messages", matches: "Match Results", rawdata: "Raw Data / Analysis" };
+const routes = {
+  dashboard: renderDashboard, import: renderImport, matches: renderMatches,
+  rawdata: renderRawData, errors: renderErrors, history: renderHistory,
+  audit: renderAudit, settings: renderSettings,
+};
+const titles = {
+  dashboard: "Dashboard", import: "Import Messages", matches: "Match Results",
+  rawdata: "Raw Data / Analysis", errors: "Errors", history: "Match History",
+  audit: "Audit Log", settings: "Settings",
+};
 
 function navigate() {
+  if (!CURRENT_USER) return;
+  closeModal();   // a detail modal must not survive a route change
   const hash = location.hash.replace(/^#\//, "") || "dashboard";
   const [route, qs] = hash.split("?");
+  const link = $(`.nav a[data-route="${route}"]`);
+  if (link && link.hidden) {
+    $("#view").innerHTML =
+      `<div class="empty"><div class="big">🔒</div>บทบาท ${esc(CURRENT_USER.role)} ไม่มีสิทธิ์เข้าหน้านี้</div>`;
+    $("#page-title").textContent = "ไม่มีสิทธิ์";
+    return;
+  }
   const fn = routes[route] || renderDashboard;
   $$(".nav a").forEach(a => a.classList.toggle("active", a.dataset.route === route));
   $("#page-title").textContent = titles[route] || "Dashboard";
@@ -260,40 +286,67 @@ function showImportResults(res) {
 async function renderMatches(params) {
   const state = {
     search: params.get("search") || "", status: params.get("status") || "",
-    origin: "", destination: "", reviewed: "", page: 1,
+    origin: "", destination: "", airlinePrefix: "", flight: "", version: "",
+    duplicate: "", dateFrom: "", dateTo: "", reviewed: "", page: 1,
   };
   const v = $("#view");
   v.innerHTML = `
     <div class="panel">
       <div class="filter-bar">
-        <input type="search" id="m-search" placeholder="MAWB / HAWB / Shipper / Flight…" value="${esc(state.search)}" style="width:260px">
+        <input type="search" id="m-search" placeholder="MAWB / HAWB / Shipper / Flight / Filename / Batch…" value="${esc(state.search)}" style="width:300px">
         <select id="m-status">
           <option value="">ทุกสถานะ</option>
-          ${Object.keys(STATUS_META).filter(s => !["PARSED"].includes(s)).map(s =>
+          ${Object.keys(STATUS_META).filter(s => s !== "PARSED").map(s =>
             `<option value="${s}" ${state.status === s ? "selected" : ""}>${s}</option>`).join("")}
         </select>
-        <input type="text" id="m-origin" placeholder="Origin เช่น HKG" style="width:120px" maxlength="3">
-        <input type="text" id="m-dest" placeholder="Dest เช่น BKK" style="width:120px" maxlength="3">
+        <input type="text" id="m-origin" placeholder="Origin" style="width:96px" maxlength="3">
+        <input type="text" id="m-dest" placeholder="Dest" style="width:96px" maxlength="3">
+        <button class="btn sm" id="m-more">⋯ ตัวกรองเพิ่ม</button>
+        <button class="btn primary sm" id="m-apply">Apply</button>
+        <div class="spacer"></div>
+        <button class="btn sm" id="m-export">⇓ Export</button>
+      </div>
+      <div class="filter-bar" id="m-more-bar" style="display:none">
+        <input type="text" id="m-prefix" placeholder="Airline prefix เช่น 217" style="width:170px" maxlength="3">
+        <input type="text" id="m-flight" placeholder="Flight เช่น TG601" style="width:150px">
+        <input type="text" id="m-version" placeholder="FWB version" style="width:130px">
+        <select id="m-duplicate">
+          <option value="">Duplicate: ทั้งหมด</option>
+          <option value="true">มี duplicate</option><option value="false">ไม่มี duplicate</option>
+        </select>
         <select id="m-reviewed">
           <option value="">Reviewed: ทั้งหมด</option>
           <option value="true">Reviewed</option><option value="false">Unreviewed</option>
         </select>
-        <button class="btn primary sm" id="m-apply">Apply</button>
-        <div class="spacer"></div>
-        <a class="btn sm" href="${API}/data/matching_results/export" download>⇓ Export CSV</a>
+        <label style="font-size:.82rem;color:var(--muted)">Matched</label>
+        <input type="date" id="m-from" style="width:150px">
+        <input type="date" id="m-to" style="width:150px">
       </div>
       <div id="m-table"></div>
     </div>`;
 
-  async function load() {
+  const collectFilters = () => {
     state.search = $("#m-search").value.trim();
     state.status = $("#m-status").value;
     state.origin = $("#m-origin").value.trim();
     state.destination = $("#m-dest").value.trim();
+    state.airlinePrefix = $("#m-prefix").value.trim();
+    state.flight = $("#m-flight").value.trim();
+    state.version = $("#m-version").value.trim();
+    state.duplicate = $("#m-duplicate").value;
     state.reviewed = $("#m-reviewed").value;
+    state.dateFrom = $("#m-from").value;
+    state.dateTo = $("#m-to").value;
+  };
+
+  async function load() {
+    collectFilters();
     const q = new URLSearchParams({
       page: state.page, pageSize: 25, search: state.search, status: state.status,
-      origin: state.origin, destination: state.destination, reviewed: state.reviewed,
+      origin: state.origin, destination: state.destination,
+      airlinePrefix: state.airlinePrefix, flight: state.flight,
+      version: state.version, duplicate: state.duplicate,
+      dateFrom: state.dateFrom, dateTo: state.dateTo, reviewed: state.reviewed,
     });
     let data;
     try { data = await api("/matches?" + q); }
@@ -308,7 +361,8 @@ async function renderMatches(params) {
         </tr></thead>
         <tbody>${data.items.map(r => `
           <tr class="clickable" onclick="openDetail('${esc(r.mawb_number)}')">
-            <td>${badge(r.match_status)}</td>
+            <td>${badge(r.effective_status || r.match_status)}${
+              r.override_status ? ' <span class="badge muted" title="กำหนดโดยผู้ดูแล">manual</span>' : ""}</td>
             <td class="mono"><b>${esc(r.mawb_number)}</b></td>
             <td>${r.origin ? esc(r.origin) + "→" + esc(r.destination) : "—"}</td>
             <td>${esc(r.flight_number || "—")}</td>
@@ -335,8 +389,54 @@ async function renderMatches(params) {
   }
   $("#m-apply").onclick = () => { state.page = 1; load(); };
   $("#m-search").onkeydown = (e) => { if (e.key === "Enter") { state.page = 1; load(); } };
+  $("#m-more").onclick = () => {
+    const bar = $("#m-more-bar");
+    bar.style.display = bar.style.display === "none" ? "flex" : "none";
+  };
+  $("#m-export").onclick = () => {
+    collectFilters();
+    openExportMenu({
+      status: state.status, dateFrom: state.dateFrom, dateTo: state.dateTo,
+      search: state.search,
+    });
+  };
   load();
 }
+
+/* ---------------- export menu ---------------- */
+const EXPORT_CHOICES = [
+  ["XLSX", "Excel (.xlsx)", "6 sheet: Summary, FWB, FHL, Validation Results, Errors, Audit Log"],
+  ["CSV", "CSV", "หนึ่งบรรทัดต่อ MAWB (สรุปผลการจับคู่)"],
+  ["JSON", "JSON", "ทุก section ในไฟล์เดียว เหมาะกับการนำไปประมวลผลต่อ"],
+  ["RAW", "Raw Package (.zip)", "ไฟล์ข้อความต้นฉบับแยกตาม MAWB พร้อม manifest.json"],
+];
+
+window.openExportMenu = (filters) => {
+  const active = Object.entries(filters).filter(([, v]) => v);
+  $("#modal-root").innerHTML = `
+    <div class="modal-back" onclick="if(event.target===this)closeModal()">
+      <div class="modal" style="max-width:620px">
+        <div class="modal-head"><h2>Export รายงาน</h2>
+          <button class="close" onclick="closeModal()">✕</button></div>
+        <div class="modal-body">
+          <p style="color:var(--muted);font-size:.85rem;margin-bottom:14px">
+            ใช้ตัวกรองเดียวกับหน้าจอปัจจุบัน${active.length
+              ? `: ${active.map(([k, v]) => `<b>${esc(k)}</b>=${esc(v)}`).join(" · ")}`
+              : " (ไม่มีตัวกรอง — ส่งออกทั้งหมด)"}
+          </p>
+          <div class="export-grid">${EXPORT_CHOICES.map(([fmt, name, desc]) => `
+            <button class="export-choice" onclick="runExport('${fmt}')">
+              <b>${esc(name)}</b><span>${esc(desc)}</span></button>`).join("")}
+          </div>
+        </div></div></div>`;
+  window.__exportFilters = filters;
+};
+window.runExport = (format) => {
+  const q = new URLSearchParams({ format, ...window.__exportFilters });
+  window.open(`${API}/exports?${q}`, "_blank");
+  closeModal();
+  toast(`กำลังดาวน์โหลด ${format}`);
+};
 
 /* ---------------- match detail modal ---------------- */
 window.openDetail = async function (mawb) {
@@ -347,14 +447,19 @@ window.openDetail = async function (mawb) {
   const fwb = d.fwb;
 
   const tabs = ["Overview", "Houses", "Comparison", "Raw", "Parsed", "History"];
+  const status = r.effective_status || r.match_status;
   $("#modal-root").innerHTML = `
     <div class="modal-back" onclick="if(event.target===this)closeModal()">
       <div class="modal">
         <div class="modal-head">
           <h2>MAWB <span class="mono">${esc(mawb)}</span></h2>
-          ${badge(r.match_status)} <span class="score-pill" style="background:rgba(255,255,255,.15);color:#ffe9a8">${r.match_score}</span>
-          <button class="btn sm" style="margin-left:14px" onclick="doRematch('${esc(mawb)}')">↻ Re-match</button>
-          <button class="btn sm" onclick="doReview('${esc(mawb)}')">${r.reviewed ? "✓ Reviewed" : "Mark reviewed"}</button>
+          ${badge(status)} <span class="score-pill" style="background:rgba(255,255,255,.15);color:#ffe9a8">${r.match_score}</span>
+          ${r.override_status ? `<span class="badge muted" title="${esc(r.override_reason || "")}">ตั้งค่าโดย ${esc(r.override_by || "admin")}</span>` : ""}
+          <div style="margin-left:14px;display:flex;gap:8px">
+          ${isAdmin() ? `<button class="btn sm" onclick="doRematch('${esc(mawb)}')">↻ Re-match</button>` : ""}
+          ${canImport() ? `<button class="btn sm" onclick="doReview('${esc(mawb)}')">${r.reviewed ? "✓ Reviewed" : "Mark reviewed"}</button>` : ""}
+          ${isAdmin() ? `<button class="btn sm" onclick="doOverride('${esc(mawb)}')">⚑ Resolve / Reject</button>` : ""}
+          </div>
           <button class="close" onclick="closeModal()">✕</button>
         </div>
         <div class="modal-body">
@@ -392,19 +497,42 @@ window.openDetail = async function (mawb) {
               <div class="muted">${esc(e.status_date || "")} ${esc(e.flight_number || "")}
                 ${e.weight ? `· ${fmtW(e.weight)} ${esc(e.weight_unit || "")}` : ""}</div>
             </div></div>`).join("")}</div>` : ""}`,
-    Houses: () => d.houses.length ? `
-      <div class="tbl-wrap"><table class="tbl">
-        <thead><tr><th>HAWB</th><th>Shipper</th><th>Consignee</th><th>Commodity</th>
-          <th class="num">Pieces</th><th class="num">Weight</th><th>HS Code</th><th>Tax ID</th></tr></thead>
+    Houses: () => `
+      ${d.houses.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>HAWB</th><th>Link</th><th>Shipper</th><th>Consignee</th><th>Commodity</th>
+          <th class="num">Pieces</th><th class="num">Weight</th><th>HS Code</th><th>Tax ID</th>
+          ${isAdmin() ? "<th></th>" : ""}</tr></thead>
         <tbody>${d.houses.map(h => `
           <tr><td class="mono"><b>${esc(h.hawb_number)}</b></td>
-            <td>${esc(h.shipper_name || "—")}</td><td>${esc(h.consignee_name || "—")}</td>
-            <td>${esc(h.commodity || "—")}</td>
+            <td>${h.linked_by === "MANUAL"
+              ? '<span class="badge warn">MANUAL</span>'
+              : '<span class="badge muted">AUTO</span>'}</td>
+            <td class="trunc" title="${esc(h.shipper_name || "")}">${esc(h.shipper_name || "—")}</td>
+            <td class="trunc" title="${esc(h.consignee_name || "")}">${esc(h.consignee_name || "—")}</td>
+            <td class="trunc">${esc(h.commodity || "—")}</td>
             <td class="num">${h.pieces ?? "—"}</td>
             <td class="num">${fmtW(h.gross_weight)} ${esc(h.weight_unit || "")}</td>
             <td class="mono">${esc(h.hs_code || "—")}</td>
-            <td class="mono">${esc(h.consignee_tax_id || "—")}</td></tr>`).join("")}
-        </tbody></table></div>` : `<div class="empty">ยังไม่มี FHL สำหรับ MAWB นี้</div>`,
+            <td class="mono">${esc(h.consignee_tax_id || "—")}</td>
+            ${isAdmin() ? `<td><button class="btn sm" onclick="event.stopPropagation();doUnlink('${esc(mawb)}','${esc(h.id)}','${esc(h.hawb_number)}')">Unlink</button></td>` : ""}
+          </tr>`).join("")}
+        </tbody></table></div>` : `<div class="empty">ยังไม่มี FHL สำหรับ MAWB นี้</div>`}
+      ${d.unlinkedHouses?.length ? `
+        <div class="section-title"><h3>House ที่ถูก Unlink ไว้</h3></div>
+        <div class="tbl-wrap"><table class="tbl">
+          <thead><tr><th>HAWB</th><th class="num">Pieces</th><th class="num">Weight</th>
+            <th>เหตุผล</th><th>โดย</th>${isAdmin() ? "<th></th>" : ""}</tr></thead>
+          <tbody>${d.unlinkedHouses.map(h => `<tr>
+            <td class="mono">${esc(h.hawb_number)}</td>
+            <td class="num">${h.pieces ?? "—"}</td>
+            <td class="num">${fmtW(h.gross_weight)}</td>
+            <td style="white-space:normal">${esc(h.reason || "—")}</td>
+            <td>${esc(h.performed_by || "—")}</td>
+            ${isAdmin() ? `<td><button class="btn sm" onclick="doClearLink('${esc(mawb)}','${esc(h.id)}')">คืนค่าอัตโนมัติ</button></td>` : ""}
+          </tr>`).join("")}</tbody></table></div>` : ""}
+      ${isAdmin() ? `<div style="margin-top:18px">
+        <button class="btn gold" onclick="openLinkPicker('${esc(mawb)}')">+ Link house เข้ากับ MAWB นี้</button>
+      </div>` : ""}`,
     Comparison: () => d.validations.length ? `
       <div class="tbl-wrap"><table class="tbl">
         <thead><tr><th>Validation Rule</th><th>Severity</th><th>FWB Value</th>
@@ -447,6 +575,9 @@ window.openDetail = async function (mawb) {
 };
 const kv = (k, v) => `<div class="item"><div class="k">${esc(k)}</div><div class="v">${v ?? "—"}</div></div>`;
 window.closeModal = () => { $("#modal-root").innerHTML = ""; };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#modal-root").innerHTML) closeModal();
+});
 window.toastCopy = () => toast("คัดลอกแล้ว");
 window.doRematch = async (mawb) => {
   try {
@@ -456,13 +587,89 @@ window.doRematch = async (mawb) => {
   } catch (e) { toast(e.message, true); }
 };
 window.doReview = async (mawb) => {
-  const note = prompt("หมายเหตุการ review (ไม่บังคับ):") ?? "";
+  const note = prompt("หมายเหตุการ review (ไม่บังคับ):");
+  if (note === null) return;
   try {
-    await api(`/matches/${encodeURIComponent(mawb)}/review`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reviewed: true, note, reviewer: "operator" }),
-    });
+    await api(`/matches/${encodeURIComponent(mawb)}/review`,
+              jsonPost({ reviewed: true, note }));
     toast("Mark as reviewed แล้ว");
+    openDetail(mawb);
+  } catch (e) { toast(e.message, true); }
+};
+window.doOverride = async (mawb) => {
+  const choice = prompt(
+    "กำหนดสถานะเอง — พิมพ์ RESOLVED, REJECTED, NEEDS_REVIEW " +
+    "หรือ CLEAR เพื่อกลับไปใช้ผลที่ระบบคำนวณ:");
+  if (choice === null) return;
+  const value = choice.trim().toUpperCase();
+  const status = value === "CLEAR" ? null : value;
+  const reason = prompt("เหตุผล (บันทึกลง audit log):") ?? "";
+  try {
+    await api(`/matches/${encodeURIComponent(mawb)}/status`,
+              jsonPost({ status, reason }));
+    toast(status ? `ตั้งสถานะเป็น ${status}` : "คืนค่าสถานะที่ระบบคำนวณแล้ว");
+    openDetail(mawb);
+  } catch (e) { toast(e.message, true); }
+};
+window.doUnlink = async (mawb, fhlId, hawb) => {
+  const reason = prompt(`เหตุผลที่ unlink ${hawb} ออกจาก ${mawb}:`);
+  if (reason === null) return;
+  try {
+    const r = await api(`/matches/${encodeURIComponent(mawb)}/houses/${fhlId}/unlink`,
+                        jsonPost({ reason }));
+    toast(`Unlink แล้ว — สถานะใหม่ ${r.status} (score ${r.score})`);
+    openDetail(mawb);
+  } catch (e) { toast(e.message, true); }
+};
+window.doClearLink = async (mawb, fhlId) => {
+  try {
+    await api(`/matches/${encodeURIComponent(mawb)}/houses/${fhlId}/link`,
+              { method: "DELETE" });
+    toast("คืนค่าการจับคู่อัตโนมัติแล้ว");
+    openDetail(mawb);
+  } catch (e) { toast(e.message, true); }
+};
+window.openLinkPicker = async (mawb) => {
+  const render = (items) => `
+    <div class="modal-back" onclick="if(event.target===this)openDetail('${esc(mawb)}')">
+      <div class="modal" style="max-width:820px">
+        <div class="modal-head"><h2>Link house เข้ากับ <span class="mono">${esc(mawb)}</span></h2>
+          <button class="close" onclick="openDetail('${esc(mawb)}')">✕</button></div>
+        <div class="modal-body">
+          <div class="filter-bar">
+            <input type="search" id="lp-search" placeholder="ค้นหา HAWB หรือ MAWB…" style="width:280px">
+            <button class="btn primary sm" id="lp-go">ค้นหา</button>
+          </div>
+          <div class="tbl-wrap"><table class="tbl">
+            <thead><tr><th>HAWB</th><th>MAWB เดิม</th><th class="num">Pieces</th>
+              <th class="num">Weight</th><th>Commodity</th><th></th></tr></thead>
+            <tbody>${items.map(h => `<tr>
+              <td class="mono"><b>${esc(h.hawb_number)}</b></td>
+              <td class="mono">${esc(h.mawb_number)}${h.mawb_number !== mawb
+                ? ' <span class="badge warn">ต่าง MAWB</span>' : ""}</td>
+              <td class="num">${h.pieces ?? "—"}</td>
+              <td class="num">${fmtW(h.gross_weight)}</td>
+              <td>${esc(h.commodity || "—")}</td>
+              <td><button class="btn gold sm" onclick="doLink('${esc(mawb)}','${esc(h.id)}','${esc(h.hawb_number)}')">Link</button></td>
+            </tr>`).join("") || `<tr><td colspan="6" class="empty">ไม่พบ house</td></tr>`}
+            </tbody></table></div>
+        </div></div></div>`;
+  const load = async (search = "") => {
+    const d = await api(`/houses/unassigned?${new URLSearchParams({ search })}`);
+    $("#modal-root").innerHTML = render(d.items);
+    $("#lp-go").onclick = () => load($("#lp-search").value.trim());
+    $("#lp-search").onkeydown = (e) => { if (e.key === "Enter") load(e.target.value.trim()); };
+    $("#lp-search").value = search;
+  };
+  try { await load(); } catch (e) { toast(e.message, true); }
+};
+window.doLink = async (mawb, fhlId, hawb) => {
+  const reason = prompt(`เหตุผลที่ link ${hawb} เข้ากับ ${mawb}:`);
+  if (reason === null) return;
+  try {
+    const r = await api(`/matches/${encodeURIComponent(mawb)}/houses/${fhlId}/link`,
+                        jsonPost({ reason }));
+    toast(`Link แล้ว — สถานะใหม่ ${r.status} (score ${r.score})`);
     openDetail(mawb);
   } catch (e) { toast(e.message, true); }
 };
@@ -714,8 +921,292 @@ async function renderRawData(params) {
   load();
 }
 
+/* ---------------- errors page ---------------- */
+async function renderErrors() {
+  const v = $("#view");
+  v.innerHTML = `<div class="empty">Loading…</div>`;
+  let d;
+  try { d = await api("/errors"); }
+  catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+
+  const sevBadge = (s) => `<span class="badge ${s === "ERROR" ? "err" : "warn"}">${esc(s)}</span>`;
+  v.innerHTML = `
+    <div class="cards">
+      <div class="stat-card accent-err"><div class="label">Parse Errors</div>
+        <div class="value">${d.parseErrors.length}</div></div>
+      <div class="stat-card accent-warn"><div class="label">Failed Rules</div>
+        <div class="value">${d.validationFailures.length}</div></div>
+      <div class="stat-card accent-info"><div class="label">Duplicates</div>
+        <div class="value">${d.duplicates.length}</div></div>
+    </div>
+    <div class="panel">
+      <h2>ไฟล์ที่ Parse ไม่สำเร็จ</h2>
+      ${d.parseErrors.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Error Code</th>
+          <th>Message</th><th>By</th><th>Imported</th></tr></thead>
+        <tbody>${d.parseErrors.map(r => `<tr>
+          <td>${esc(r.original_filename || "(pasted)")}</td>
+          <td>${esc(r.message_type || "—")}</td>
+          <td>${badge(r.parse_status)}</td>
+          <td class="mono">${esc(r.parse_error_code || "—")}</td>
+          <td style="white-space:normal">${esc(r.parse_error_message || "")}</td>
+          <td>${esc(r.imported_by || "—")}</td><td>${fmtD(r.imported_at)}</td></tr>`).join("")}
+        </tbody></table></div>` : `<div class="empty">ไม่มีไฟล์ที่ parse ไม่สำเร็จ</div>`}
+    </div>
+    <div class="panel">
+      <h2>Validation Rules ที่ไม่ผ่าน</h2>
+      ${d.validationFailures.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>MAWB</th><th>Rule</th><th>Severity</th><th>FWB</th>
+          <th>FHL</th><th>Difference</th><th></th></tr></thead>
+        <tbody>${d.validationFailures.map(r => `<tr class="clickable" onclick="openDetail('${esc(r.mawb_number)}')">
+          <td class="mono"><b>${esc(r.mawb_number)}</b></td>
+          <td><b>${esc(r.rule_code)}</b></td><td>${sevBadge(r.severity)}</td>
+          <td class="mono">${esc(r.fwb_value ?? "—")}</td>
+          <td class="mono">${esc(r.fhl_value ?? "—")}</td>
+          <td class="mono">${esc(r.difference_value ?? "—")}</td>
+          <td><button class="btn sm">ตรวจสอบ →</button></td></tr>`).join("")}
+        </tbody></table></div>` : `<div class="empty">ทุกกฎผ่านหมด</div>`}
+    </div>
+    <div class="panel">
+      <h2>ข้อความซ้ำ</h2>
+      ${d.duplicates.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>File</th><th>Type</th><th>Duplicate Type</th>
+          <th>Detail</th><th>Imported</th></tr></thead>
+        <tbody>${d.duplicates.map(r => `<tr>
+          <td>${esc(r.original_filename || "(pasted)")}</td>
+          <td>${esc(r.message_type || "—")}</td>
+          <td><span class="badge warn">${esc(r.duplicate_type || "EXACT")}</span></td>
+          <td style="white-space:normal;font-size:.8rem">${esc(r.parse_error_message || "ข้อมูลธุรกิจซ้ำ (revision)")}</td>
+          <td>${fmtD(r.imported_at)}</td></tr>`).join("")}
+        </tbody></table></div>` : `<div class="empty">ไม่มีข้อความซ้ำ</div>`}
+    </div>`;
+}
+
+/* ---------------- history page ---------------- */
+async function renderHistory(params) {
+  const state = { mawb: params.get("mawb") || "", page: 1 };
+  $("#view").innerHTML = `
+    <div class="panel">
+      <div class="filter-bar">
+        <input type="search" id="h-mawb" placeholder="กรองด้วย MAWB…" value="${esc(state.mawb)}" style="width:240px">
+        <button class="btn primary sm" id="h-apply">Apply</button>
+      </div>
+      <div id="h-table"></div>
+    </div>`;
+  async function load() {
+    state.mawb = $("#h-mawb").value.trim();
+    let d;
+    try { d = await api(`/history?${new URLSearchParams({ page: state.page, pageSize: 50, mawb: state.mawb })}`); }
+    catch (e) { $("#h-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    $("#h-table").innerHTML = d.items.length ? `
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>When</th><th>MAWB</th><th>Event</th><th>Status change</th>
+          <th class="num">Score</th><th>By</th></tr></thead>
+        <tbody>${d.items.map(h => `<tr class="clickable" onclick="openDetail('${esc(h.mawb_number)}')">
+          <td>${fmtD(h.performed_at)}</td>
+          <td class="mono"><b>${esc(h.mawb_number)}</b></td>
+          <td><span class="badge info">${esc(h.event_type)}</span></td>
+          <td>${h.previous_status ? badge(h.previous_status) + " → " : ""}${badge(h.new_status)}</td>
+          <td class="num">${h.previous_score ?? "—"} → <b>${h.new_score ?? "—"}</b></td>
+          <td>${esc(h.performed_by || "—")}</td></tr>`).join("")}
+        </tbody></table></div>
+      <div class="pager"><span>${d.total} เหตุการณ์</span>
+        <button class="btn sm" id="h-prev" ${state.page <= 1 ? "disabled" : ""}>←</button>
+        <span>หน้า ${state.page}</span>
+        <button class="btn sm" id="h-next" ${state.page * 50 >= d.total ? "disabled" : ""}>→</button>
+      </div>` : `<div class="empty">ยังไม่มีประวัติ</div>`;
+    const p = $("#h-prev"), n = $("#h-next");
+    if (p) p.onclick = () => { state.page--; load(); };
+    if (n) n.onclick = () => { state.page++; load(); };
+  }
+  $("#h-apply").onclick = () => { state.page = 1; load(); };
+  $("#h-mawb").onkeydown = (e) => { if (e.key === "Enter") { state.page = 1; load(); } };
+  load();
+}
+
+/* ---------------- audit page ---------------- */
+async function renderAudit() {
+  const state = { eventType: "", page: 1 };
+  $("#view").innerHTML = `
+    <div class="panel">
+      <div class="filter-bar">
+        <label style="font-size:.85rem;font-weight:600">Event type</label>
+        <select id="a-type"><option value="">ทั้งหมด</option></select>
+        <button class="btn primary sm" id="a-apply">Apply</button>
+      </div>
+      <div id="a-table"></div>
+    </div>`;
+  async function load() {
+    state.eventType = $("#a-type").value;
+    let d;
+    try { d = await api(`/audit?${new URLSearchParams({ page: state.page, pageSize: 50, eventType: state.eventType })}`); }
+    catch (e) { $("#a-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const sel = $("#a-type");
+    if (sel.options.length === 1) {
+      d.eventTypes.forEach(t => sel.add(new Option(t, t)));
+      sel.value = state.eventType;
+    }
+    $("#a-table").innerHTML = d.items.length ? `
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>When</th><th>Event</th><th>User</th><th>Entity</th>
+          <th>Reason</th><th>IP</th></tr></thead>
+        <tbody>${d.items.map(a => `<tr>
+          <td>${fmtD(a.created_at)}</td>
+          <td><span class="badge info">${esc(a.event_type)}</span></td>
+          <td><b>${esc(a.user_id || "—")}</b></td>
+          <td class="mono" style="font-size:.76rem">${esc(a.entity_type || "")} ${esc((a.entity_id || "").slice(0, 20))}</td>
+          <td style="white-space:normal">${esc(a.reason || "—")}</td>
+          <td class="mono" style="font-size:.76rem">${esc(a.ip_address || "—")}</td></tr>`).join("")}
+        </tbody></table></div>
+      <div class="pager"><span>${d.total} รายการ</span>
+        <button class="btn sm" id="a-prev" ${state.page <= 1 ? "disabled" : ""}>←</button>
+        <span>หน้า ${state.page}</span>
+        <button class="btn sm" id="a-next" ${state.page * 50 >= d.total ? "disabled" : ""}>→</button>
+      </div>` : `<div class="empty">ยังไม่มี audit log</div>`;
+    const p = $("#a-prev"), n = $("#a-next");
+    if (p) p.onclick = () => { state.page--; load(); };
+    if (n) n.onclick = () => { state.page++; load(); };
+  }
+  $("#a-apply").onclick = () => { state.page = 1; load(); };
+  load();
+}
+
+/* ---------------- settings page ---------------- */
+async function renderSettings() {
+  const v = $("#view");
+  v.innerHTML = `<div class="empty">Loading…</div>`;
+  let d;
+  try { d = await api("/settings"); }
+  catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+
+  const editable = isAdmin();
+  const field = (s) => {
+    if (s.type === "severity") {
+      return `<select data-key="${s.key}" ${editable ? "" : "disabled"}>
+        ${["ERROR", "WARNING", "INFO"].map(x =>
+          `<option ${x === s.value ? "selected" : ""}>${x}</option>`).join("")}</select>`;
+    }
+    const value = Array.isArray(s.value) ? s.value.join(",") : s.value;
+    return `<input type="text" data-key="${s.key}" value="${esc(value)}" ${editable ? "" : "disabled"}>`;
+  };
+  v.innerHTML = `
+    <div class="panel">
+      <h2>Matching Rules</h2>
+      <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
+        ${editable
+          ? "แก้ค่าแล้วกดบันทึก ระบบจะ re-match ทุก MAWB ใหม่ทันทีและบันทึก audit log"
+          : `บทบาท ${esc(CURRENT_USER.role)} ดูได้อย่างเดียว — เฉพาะ Administrator เท่านั้นที่แก้ไขได้`}
+      </p>
+      <div class="settings-grid">
+        ${d.settings.map(s => `<div class="setting-item">
+          <div class="k">${esc(s.label)}</div>
+          ${field(s)}
+          <div class="hint">key: <code>${esc(s.key)}</code> · default:
+            ${esc(Array.isArray(s.default) ? s.default.join(",") : s.default)}</div>
+        </div>`).join("")}
+      </div>
+      ${editable ? `<div style="margin-top:20px;display:flex;gap:10px;align-items:center">
+        <button class="btn gold" id="set-save">บันทึกและ Re-match ทั้งหมด</button>
+        <button class="btn" id="set-reset">คืนค่าเริ่มต้น</button>
+        <span id="set-status" style="color:var(--muted);font-size:.85rem"></span>
+      </div>` : ""}
+    </div>
+    <div class="panel">
+      <h2>บัญชีผู้ใช้และสิทธิ์</h2>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>บทบาท</th><th>สิทธิ์ตามเอกสารออกแบบ §4</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge err">ADMINISTRATOR</span></td>
+            <td style="white-space:normal">Import, Reprocess/Re-match, Manual link/unlink, Resolve &amp; Reject, ตั้งค่า Matching Rule, ดู Audit Log, Export</td></tr>
+          <tr><td><span class="badge warn">OPERATOR</span></td>
+            <td style="white-space:normal">Import, ดู Dashboard และ Match Result, Mark as Reviewed, เพิ่มหมายเหตุ, Export</td></tr>
+          <tr><td><span class="badge info">VIEWER</span></td>
+            <td style="white-space:normal">ดู Dashboard, Match Result, Message Detail และ Export</td></tr>
+        </tbody></table></div>
+      <div id="user-list"></div>
+    </div>`;
+
+  if (editable) {
+    $("#set-save").onclick = async () => {
+      const changes = {};
+      $$("[data-key]").forEach(el => { changes[el.dataset.key] = el.value; });
+      $("#set-status").textContent = "กำลังบันทึก…";
+      try {
+        const r = await api("/settings", { ...jsonPost({ changes, rematch: true }), method: "PUT" });
+        const changed = Object.entries(r.applied)
+          .filter(([, x]) => String(x.before) !== String(x.after));
+        $("#set-status").textContent =
+          `บันทึกแล้ว · เปลี่ยน ${changed.length} ค่า · re-match ${r.rematched} MAWB`;
+        toast(`บันทึกการตั้งค่าแล้ว — re-match ${r.rematched} MAWB`);
+      } catch (e) { $("#set-status").textContent = ""; toast(e.message, true); }
+    };
+    $("#set-reset").onclick = () => {
+      d.settings.forEach(s => {
+        const el = $(`[data-key="${s.key}"]`);
+        el.value = Array.isArray(s.default) ? s.default.join(",") : s.default;
+      });
+      $("#set-status").textContent = "คืนค่าเริ่มต้นในฟอร์มแล้ว — กดบันทึกเพื่อยืนยัน";
+    };
+    api("/users").then(u => {
+      $("#user-list").innerHTML = `
+        <div class="section-title"><h3>ผู้ใช้ในระบบ</h3></div>
+        <div class="tbl-wrap"><table class="tbl">
+          <thead><tr><th>Username</th><th>ชื่อ</th><th>Role</th><th>Active</th><th>Last login</th></tr></thead>
+          <tbody>${u.items.map(x => `<tr>
+            <td class="mono"><b>${esc(x.username)}</b></td><td>${esc(x.display_name || "—")}</td>
+            <td>${esc(x.role)}</td>
+            <td>${x.active ? '<span class="badge ok">✓</span>' : '<span class="badge muted">—</span>'}</td>
+            <td>${fmtD(x.last_login_at)}</td></tr>`).join("")}
+          </tbody></table></div>`;
+    }).catch(() => {});
+  }
+}
+
+/* ---------------- auth ---------------- */
+function showLogin(message = "") {
+  CURRENT_USER = null;
+  $("#login-root").hidden = false;
+  $("#login-error").textContent = message;
+  $("#login-user").focus();
+}
+function applyUser(user) {
+  CURRENT_USER = user;
+  $("#login-root").hidden = true;
+  $("#user-name").textContent = user.displayName || user.username;
+  $("#user-role").textContent = user.role;
+  $("#user-avatar").textContent = (user.username || "?").slice(0, 2).toUpperCase();
+  $$(".nav a").forEach(a => {
+    const allowed = a.dataset.roles;
+    a.hidden = !!allowed && !allowed.split(",").includes(user.role);
+  });
+  navigate();
+}
+
+$("#login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#login-submit");
+  btn.disabled = true;
+  $("#login-error").textContent = "";
+  try {
+    const r = await api("/auth/login", jsonPost({
+      username: $("#login-user").value.trim(),
+      password: $("#login-pass").value,
+    }));
+    $("#login-pass").value = "";
+    applyUser(r.user);
+    toast(`ยินดีต้อนรับ ${r.user.displayName || r.user.username}`);
+  } catch (err) { $("#login-error").textContent = err.message; }
+  btn.disabled = false;
+});
+
+$("#btn-logout").addEventListener("click", async () => {
+  try { await api("/auth/logout", { method: "POST" }); } catch { /* already gone */ }
+  $("#view").innerHTML = "";
+  showLogin("ออกจากระบบแล้ว");
+});
+
 /* ---------------- boot ---------------- */
-(function boot() {
+(async function boot() {
   fetch("/health/ready").then(r => {
     const chip = $("#health-chip");
     if (r.ok) { chip.textContent = "● system online"; }
@@ -724,5 +1215,9 @@ async function renderRawData(params) {
     const chip = $("#health-chip");
     chip.textContent = "● offline"; chip.classList.add("down");
   });
-  navigate();
+  try {
+    const r = await fetch(API + "/auth/me");
+    if (r.ok) { applyUser((await r.json()).user); return; }
+  } catch { /* fall through to login */ }
+  showLogin();
 })();

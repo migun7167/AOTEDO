@@ -11,6 +11,32 @@ DB_PATH = os.environ.get(
 )
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+);
+
 CREATE TABLE IF NOT EXISTS import_batches (
     id TEXT PRIMARY KEY,
     batch_no TEXT NOT NULL UNIQUE,
@@ -39,6 +65,7 @@ CREATE TABLE IF NOT EXISTS cargo_messages (
     parse_error_code TEXT,
     parse_error_message TEXT,
     duplicate_of TEXT,
+    duplicate_type TEXT,
     imported_by TEXT,
     imported_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -178,6 +205,10 @@ CREATE TABLE IF NOT EXISTS matching_results (
     reviewed_by TEXT,
     reviewed_at TEXT,
     review_note TEXT,
+    override_status TEXT,
+    override_reason TEXT,
+    override_by TEXT,
+    override_at TEXT,
     last_matched_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -190,6 +221,19 @@ CREATE TABLE IF NOT EXISTS matching_result_houses (
     linked_by_user TEXT,
     linked_at TEXT NOT NULL,
     PRIMARY KEY (matching_result_id, fhl_id)
+);
+
+-- Manual link/unlink decisions (FR-014). Kept separate from
+-- matching_result_houses so they survive every re-match.
+CREATE TABLE IF NOT EXISTS house_link_overrides (
+    id TEXT PRIMARY KEY,
+    mawb_number TEXT NOT NULL,
+    fhl_id TEXT NOT NULL REFERENCES fhl_house(id),
+    action TEXT NOT NULL,
+    reason TEXT,
+    performed_by TEXT,
+    performed_at TEXT NOT NULL,
+    UNIQUE (mawb_number, fhl_id)
 );
 
 CREATE TABLE IF NOT EXISTS validation_results (
@@ -242,10 +286,26 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the first release. SQLite has no "ADD COLUMN IF NOT
+# EXISTS", so they are applied only when missing from an existing database.
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("cargo_messages", "duplicate_type", "TEXT"),
+    ("matching_results", "override_status", "TEXT"),
+    ("matching_results", "override_reason", "TEXT"),
+    ("matching_results", "override_by", "TEXT"),
+    ("matching_results", "override_at", "TEXT"),
+]
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
         conn.executescript(SCHEMA)
+        for table, column, coltype in MIGRATIONS:
+            existing = {r["name"] for r in
+                        conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
         conn.commit()
     finally:
         conn.close()

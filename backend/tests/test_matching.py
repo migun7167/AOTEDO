@@ -4,17 +4,24 @@ from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.matching.engine import match_fwb_fhl  # noqa: E402
+from app.matching.engine import MatchingConfig, match_fwb_fhl  # noqa: E402
 
 
-def fwb(pieces=1, weight=149.0, origin="HKG", dest="BKK"):
+def fwb(pieces=1, weight=149.0, origin="HKG", dest="BKK", unit="K", version="16"):
     return {"mawb_number": "217-08722685", "origin": origin, "destination": dest,
-            "pieces": pieces, "gross_weight": weight}
+            "pieces": pieces, "gross_weight": weight, "weight_unit": unit,
+            "message_version": version}
 
 
-def fhl(hawb="WM26070003", pieces=1, weight=149.0, origin="HKG", dest="BKK"):
-    return {"hawb_number": hawb, "origin": origin, "destination": dest,
-            "pieces": pieces, "gross_weight": weight}
+def fhl(hawb="WM26070003", pieces=1, weight=149.0, origin="HKG", dest="BKK",
+        unit="K", version="4", mawb="217-08722685"):
+    return {"mawb_number": mawb, "hawb_number": hawb, "origin": origin,
+            "destination": dest, "pieces": pieces, "gross_weight": weight,
+            "weight_unit": unit, "message_version": version}
+
+
+def rules(result):
+    return {v["rule_code"]: v["result"] for v in result["validations"]}
 
 
 def test_exact_match():
@@ -68,6 +75,63 @@ def test_waiting_for_fhl():
 
 
 def test_custom_tolerance():
-    r = match_fwb_fhl(fwb(weight=149.0), [fhl(weight=147.0)],
-                      absolute_weight_tolerance=Decimal("5"))
-    assert r["status"] == "MATCHED_WITH_TOLERANCE"
+    """A wider tolerance turns a mismatch into an accepted match."""
+    strict = match_fwb_fhl(fwb(weight=149.0), [fhl(weight=147.0)])
+    assert strict["status"] == "PARTIAL_MATCH"
+    lenient = match_fwb_fhl(fwb(weight=149.0), [fhl(weight=147.0)],
+                            MatchingConfig(weight_tolerance_abs=Decimal("5")))
+    assert lenient["status"] == "MATCHED_WITH_TOLERANCE"
+
+
+def test_custom_scores_change_total():
+    cfg = MatchingConfig(score_mawb=40, score_origin=15, score_destination=15,
+                         score_pieces=15, score_weight=15)
+    r = match_fwb_fhl(fwb(), [fhl()], cfg)
+    assert r["status"] == "MATCHED"
+    assert r["score"] == 100
+
+
+def test_weight_unit_mismatch_is_rejected():
+    """Kilograms against pounds are not comparable, so the match is refused."""
+    r = match_fwb_fhl(fwb(unit="K"), [fhl(unit="L")])
+    assert r["status"] == "REJECTED"
+    assert rules(r)["WEIGHT_UNIT_MATCH"] == "FAIL"
+
+
+def test_missing_hawb_is_rejected():
+    r = match_fwb_fhl(fwb(), [fhl(hawb="")])
+    assert r["status"] == "REJECTED"
+    assert rules(r)["HAWB_PRESENT"] == "FAIL"
+
+
+def test_unsupported_version_fails_rule_but_still_scores():
+    r = match_fwb_fhl(fwb(), [fhl(version="99")])
+    assert rules(r)["VERSION_SUPPORTED"] == "FAIL"
+    assert r["status"] == "MATCHED"  # not a blocking rule
+
+
+def test_supported_versions_are_configurable():
+    cfg = MatchingConfig(supported_fhl_versions=["4", "99"])
+    r = match_fwb_fhl(fwb(), [fhl(version="99")], cfg)
+    assert rules(r)["VERSION_SUPPORTED"] == "PASS"
+
+
+def test_mawb_mismatch_reported_for_manually_linked_house():
+    r = match_fwb_fhl(fwb(), [fhl(mawb="217-99999999")])
+    assert rules(r)["MAWB_MATCH"] == "FAIL"
+
+
+def test_all_default_rules_present():
+    r = match_fwb_fhl(fwb(), [fhl()])
+    assert set(rules(r)) == {
+        "MAWB_MATCH", "ORIGIN_MATCH", "DESTINATION_MATCH", "PIECES_MATCH",
+        "WEIGHT_MATCH", "WEIGHT_UNIT_MATCH", "DUPLICATE_HAWB", "HAWB_PRESENT",
+        "MASTER_PRESENT", "VERSION_SUPPORTED"}
+    assert all(v == "PASS" for v in rules(r).values())
+
+
+def test_severity_is_configurable():
+    cfg = MatchingConfig(pieces_severity="ERROR")
+    r = match_fwb_fhl(fwb(pieces=2), [fhl(pieces=1)], cfg)
+    pieces = next(v for v in r["validations"] if v["rule_code"] == "PIECES_MATCH")
+    assert pieces["severity"] == "ERROR"

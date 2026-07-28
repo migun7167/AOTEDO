@@ -30,13 +30,17 @@
     </div>
     <nav class="nav">
       <a href="#/dashboard" data-route="dashboard"><span class="ic">▦</span> Dashboard</a>
-      <a href="#/import" data-route="import"><span class="ic">⇪</span> Import</a>
+      <a href="#/import" data-route="import" data-roles="ADMINISTRATOR,OPERATOR"><span class="ic">⇪</span> Import</a>
       <a href="#/matches" data-route="matches"><span class="ic">⇄</span> Match Results</a>
       <a href="#/rawdata" data-route="rawdata"><span class="ic">☰</span> Raw Data / Analysis</a>
+      <a href="#/errors" data-route="errors"><span class="ic">⚠</span> Errors</a>
+      <a href="#/history" data-route="history"><span class="ic">◷</span> History</a>
+      <a href="#/audit" data-route="audit" data-roles="ADMINISTRATOR"><span class="ic">🗒</span> Audit Log</a>
+      <a href="#/settings" data-route="settings"><span class="ic">⚙</span> Settings</a>
     </nav>
     <div class="sidebar-foot">
       <div class="sys-chip" id="health-chip">● checking…</div>
-      <div class="ver">v1.0.0 · SQLite</div>
+      <div class="ver">v1.1.0 · SQLite</div>
     </div>
   </aside>
 
@@ -46,11 +50,43 @@
       <div class="topbar-right">
         <input id="global-search" class="search" type="search"
                placeholder="ค้นหา MAWB / HAWB / Flight…">
-        <div class="avatar" title="operator">OP</div>
+        <div class="user-chip">
+          <div class="avatar" id="user-avatar">--</div>
+          <div class="user-meta">
+            <span id="user-name">—</span>
+            <span id="user-role" class="role-tag">—</span>
+          </div>
+          <button class="btn sm" id="btn-logout" title="ออกจากระบบ">ออก</button>
+        </div>
       </div>
     </header>
     <div id="view" class="view"></div>
   </main>
+</div>
+
+<div id="login-root" class="login-back" hidden>
+  <form class="login-card" id="login-form">
+    <svg class="logo" viewBox="0 0 64 64" aria-label="AOT logo">
+      <defs>
+        <linearGradient id="gold2" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#e9c46a"/>
+          <stop offset="0.5" stop-color="#c9a227"/>
+          <stop offset="1" stop-color="#9c7a1c"/>
+        </linearGradient>
+      </defs>
+      <circle cx="32" cy="32" r="30" fill="#0d2a5c"/>
+      <path d="M10 40 Q28 18 54 14 Q40 26 30 32 Q44 30 56 24 Q42 38 28 40 Q38 41 48 39 Q36 48 22 46 Q14 45 10 40Z" fill="url(#gold2)"/>
+    </svg>
+    <h1>Paperless <b>AOT</b></h1>
+    <p class="sub">FWB / FHL Matching Portal</p>
+    <label>ชื่อผู้ใช้<input type="text" id="login-user" autocomplete="username" required></label>
+    <label>รหัสผ่าน<input type="password" id="login-pass" autocomplete="current-password" required></label>
+    <div class="login-error" id="login-error"></div>
+    <button class="btn gold" type="submit" id="login-submit">เข้าสู่ระบบ</button>
+    <div class="login-hint">
+      บัญชีตัวอย่าง — <code>admin/admin123</code> · <code>operator/operator123</code> · <code>viewer/viewer123</code>
+    </div>
+  </form>
 </div>
 
 <div id="modal-root"></div>

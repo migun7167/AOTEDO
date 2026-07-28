@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from ..matching.engine import match_fwb_fhl
 from ..parser import ParseError, detect, parse_message
+from . import settings_service
 
 
 def now() -> str:
@@ -49,6 +50,7 @@ def import_message(conn: sqlite3.Connection, raw: str, filename: str | None,
     msg_type = version = None
     parse_status = "PARSED"
     error_code = error_message = None
+    duplicate_type = None
     parsed = None
 
     try:
@@ -58,6 +60,7 @@ def import_message(conn: sqlite3.Connection, raw: str, filename: str | None,
 
     if parse_status == "PARSED" and dup:
         parse_status = "DUPLICATE"
+        duplicate_type = "EXACT"
         error_code = "DUPLICATE_MESSAGE"
         error_message = f"Exact duplicate of message {dup['id']}"
 
@@ -70,16 +73,21 @@ def import_message(conn: sqlite3.Connection, raw: str, filename: str | None,
             parse_status, error_code = "PARSE_ERROR", "INTERNAL_PARSE_ERROR"
             error_message = str(e)
 
+    # FR-007 business key: same shipment identity, different bytes — a revision
+    # rather than a duplicate, so it is still parsed and stored, only flagged.
+    if parsed and _business_key_exists(conn, parsed, version):
+        duplicate_type = "BUSINESS_KEY"
+
     conn.execute(
         """INSERT INTO cargo_messages
            (id, batch_id, message_type, message_version, original_filename,
             file_size, source_channel, raw_message, message_hash, parse_status,
-            parse_error_code, parse_error_message, duplicate_of,
+            parse_error_code, parse_error_message, duplicate_of, duplicate_type,
             imported_by, imported_at, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (msg_id, batch_id, msg_type, version, filename, len(raw.encode()),
          source_channel, raw, msg_hash, parse_status, error_code, error_message,
-         dup["id"] if dup else None, user, ts, ts, ts))
+         dup["id"] if dup else None, duplicate_type, user, ts, ts, ts))
 
     affected_mawbs: set[str] = set()
     if parsed:
@@ -97,7 +105,8 @@ def import_message(conn: sqlite3.Connection, raw: str, filename: str | None,
             (dup["id"],) * 4) if r["mawb_number"]]
 
     audit(conn, "IMPORT_FILE", user, "cargo_messages", msg_id,
-          after={"filename": filename, "type": msg_type, "status": parse_status})
+          after={"filename": filename, "type": msg_type, "status": parse_status,
+                 "duplicateType": duplicate_type})
 
     for mawb in affected_mawbs:
         rematch(conn, mawb, user=user, event="IMPORT_TRIGGERED_REMATCH")
@@ -108,11 +117,31 @@ def import_message(conn: sqlite3.Connection, raw: str, filename: str | None,
         "messageType": msg_type,
         "version": version,
         "status": parse_status,
+        "duplicateType": duplicate_type,
         "errorCode": error_code,
         "errorMessage": error_message,
         "mawbNumbers": sorted(affected_mawbs) or duplicate_mawbs,
         "duplicateOf": dup["id"] if (parse_status == "DUPLICATE" and dup) else None,
     }
+
+
+def _business_key_exists(conn: sqlite3.Connection, parsed: dict,
+                         version: str | None) -> bool:
+    """FWB key: type+mawb+version. FHL key: type+mawb+hawb+version."""
+    if parsed["messageType"] == "FWB":
+        row = conn.execute(
+            """SELECT 1 FROM fwb_master f JOIN cargo_messages m ON m.id = f.message_id
+               WHERE f.mawb_number = ? AND m.message_version = ?""",
+            (parsed["mawbNumber"], version)).fetchone()
+        return row is not None
+    if parsed["messageType"] == "FHL":
+        row = conn.execute(
+            """SELECT 1 FROM fhl_house f JOIN cargo_messages m ON m.id = f.message_id
+               WHERE f.mawb_number = ? AND f.hawb_number = ?
+                 AND m.message_version = ?""",
+            (parsed["mawbNumber"], parsed["hawbNumber"], version)).fetchone()
+        return row is not None
+    return False
 
 
 def _persist_parsed(conn: sqlite3.Connection, msg_id: str, p: dict,
@@ -197,23 +226,55 @@ def _persist_parsed(conn: sqlite3.Connection, msg_id: str, p: dict,
     return mawbs
 
 
+def houses_for(conn: sqlite3.Connection, mawb: str) -> list[sqlite3.Row]:
+    """Houses that count towards this MAWB.
+
+    Latest row per HAWB (a re-import supersedes the earlier one), minus houses
+    an administrator unlinked, plus houses an administrator linked in manually.
+    """
+    rows = conn.execute(
+        """SELECT * FROM (
+             SELECT f.*, m.message_version, ROW_NUMBER() OVER (
+               PARTITION BY f.hawb_number
+               ORDER BY f.created_at DESC, f.rowid DESC) rn
+             FROM fhl_house f
+             JOIN cargo_messages m ON m.id = f.message_id
+             WHERE f.mawb_number = ?)
+           WHERE rn = 1""", (mawb,)).fetchall()
+
+    overrides = {r["fhl_id"]: r["action"] for r in conn.execute(
+        "SELECT fhl_id, action FROM house_link_overrides WHERE mawb_number = ?",
+        (mawb,))}
+
+    kept = [r for r in rows if overrides.get(r["id"]) != "UNLINK"]
+    linked_ids = [fid for fid, action in overrides.items() if action == "LINK"]
+    present = {r["id"] for r in kept}
+    for fhl_id in linked_ids:
+        if fhl_id in present:
+            continue
+        extra = conn.execute(
+            """SELECT f.*, m.message_version FROM fhl_house f
+               JOIN cargo_messages m ON m.id = f.message_id WHERE f.id = ?""",
+            (fhl_id,)).fetchone()
+        if extra:
+            kept.append(extra)
+    return kept
+
+
 def rematch(conn: sqlite3.Connection, mawb: str, user: str = "system",
             event: str = "REMATCH") -> dict:
     """Recompute the matching result for one MAWB and persist it."""
     ts = now()
     fwb = conn.execute(
-        """SELECT * FROM fwb_master WHERE mawb_number = ?
-           ORDER BY created_at DESC LIMIT 1""", (mawb,)).fetchone()
-    # latest FHL row per HAWB wins (re-imports supersede older ones)
-    fhls = conn.execute(
-        """SELECT * FROM (
-             SELECT f.*, ROW_NUMBER() OVER (
-               PARTITION BY hawb_number
-               ORDER BY created_at DESC, rowid DESC) rn
-             FROM fhl_house f WHERE mawb_number = ?)
-           WHERE rn = 1""", (mawb,)).fetchall()
+        """SELECT w.*, m.message_version FROM fwb_master w
+           JOIN cargo_messages m ON m.id = w.message_id
+           WHERE w.mawb_number = ?
+           ORDER BY w.created_at DESC, w.rowid DESC LIMIT 1""", (mawb,)).fetchone()
+    fhls = houses_for(conn, mawb)
 
-    result = match_fwb_fhl(dict(fwb) if fwb else None, [dict(x) for x in fhls])
+    config = settings_service.matching_config(conn)
+    result = match_fwb_fhl(dict(fwb) if fwb else None,
+                           [dict(x) for x in fhls], config)
 
     prev = conn.execute(
         "SELECT * FROM matching_results WHERE mawb_number = ?", (mawb,)).fetchone()
@@ -261,11 +322,16 @@ def rematch(conn: sqlite3.Connection, mawb: str, user: str = "system",
              result.get("pieces_match"), result.get("weight_match"),
              result.get("duplicate_hawb"), ts, ts, ts))
 
+    manual = {r["fhl_id"] for r in conn.execute(
+        """SELECT fhl_id FROM house_link_overrides
+           WHERE mawb_number = ? AND action = 'LINK'""", (mawb,))}
     for fhl in fhls:
         conn.execute(
             """INSERT OR IGNORE INTO matching_result_houses
                (matching_result_id, fhl_id, linked_by, linked_by_user, linked_at)
-               VALUES (?,?,?,?,?)""", (mr_id, fhl["id"], "AUTO", user, ts))
+               VALUES (?,?,?,?,?)""",
+            (mr_id, fhl["id"], "MANUAL" if fhl["id"] in manual else "AUTO",
+             user, ts))
 
     for v in result.get("validations", []):
         conn.execute(
@@ -290,15 +356,66 @@ def rematch(conn: sqlite3.Connection, mawb: str, user: str = "system",
     return {"id": mr_id, **{k: v for k, v in result.items() if k != "validations"}}
 
 
+def rematch_all(conn: sqlite3.Connection, user: str, event: str) -> int:
+    """Re-run matching for every known MAWB — used after a rule change."""
+    mawbs = [r["mawb_number"] for r in conn.execute(
+        """SELECT mawb_number FROM matching_results
+           UNION SELECT mawb_number FROM fwb_master
+           UNION SELECT mawb_number FROM fhl_house""")]
+    for mawb in mawbs:
+        rematch(conn, mawb, user=user, event=event)
+    return len(mawbs)
+
+
+def set_house_link(conn: sqlite3.Connection, mawb: str, fhl_id: str,
+                   action: str, reason: str, user: str) -> dict:
+    """Link or unlink a house from a MAWB (FR-014), then re-match."""
+    house = conn.execute(
+        "SELECT * FROM fhl_house WHERE id = ?", (fhl_id,)).fetchone()
+    if not house:
+        raise LookupError(f"FHL {fhl_id} not found")
+
+    before = {"linked": house["id"] in {h["id"] for h in houses_for(conn, mawb)}}
+    conn.execute(
+        """INSERT INTO house_link_overrides
+           (id, mawb_number, fhl_id, action, reason, performed_by, performed_at)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(mawb_number, fhl_id) DO UPDATE SET
+             action=excluded.action, reason=excluded.reason,
+             performed_by=excluded.performed_by, performed_at=excluded.performed_at""",
+        (new_id(), mawb, fhl_id, action, reason, user, now()))
+
+    result = rematch(conn, mawb, user=user,
+                     event="MANUAL_LINK" if action == "LINK" else "MANUAL_UNLINK")
+    audit(conn, "MANUAL_MATCH" if action == "LINK" else "MANUAL_UNMATCH",
+          user, "fhl_house", fhl_id, before=before,
+          after={"linked": action == "LINK", "mawb": mawb,
+                 "hawb": house["hawb_number"]}, reason=reason)
+    return result
+
+
+def clear_house_link(conn: sqlite3.Connection, mawb: str, fhl_id: str,
+                     user: str) -> dict:
+    """Drop a manual decision and fall back to automatic matching."""
+    conn.execute(
+        "DELETE FROM house_link_overrides WHERE mawb_number = ? AND fhl_id = ?",
+        (mawb, fhl_id))
+    result = rematch(conn, mawb, user=user, event="MANUAL_LINK_CLEARED")
+    audit(conn, "MANUAL_UNMATCH", user, "fhl_house", fhl_id,
+          after={"override": "cleared", "mawb": mawb})
+    return result
+
+
 def audit(conn: sqlite3.Connection, event_type: str, user: str,
           entity_type: str | None = None, entity_id: str | None = None,
           before: dict | None = None, after: dict | None = None,
-          reason: str | None = None, ip: str | None = None) -> None:
+          reason: str | None = None, ip: str | None = None,
+          user_agent: str | None = None) -> None:
     conn.execute(
         """INSERT INTO audit_logs
            (id, event_type, user_id, entity_type, entity_id, before_value,
             after_value, reason, ip_address, user_agent, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,NULL,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (new_id(), event_type, user, entity_type, entity_id,
          json.dumps(before) if before else None,
-         json.dumps(after) if after else None, reason, ip, now()))
+         json.dumps(after) if after else None, reason, ip, user_agent, now()))
