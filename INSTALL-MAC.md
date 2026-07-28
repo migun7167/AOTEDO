@@ -12,20 +12,52 @@
 ดับเบิลคลิก `paperless-aot.zip` จะได้โฟลเดอร์ `paperless-aot`
 ย้ายไปไว้ที่ไหนก็ได้ เช่น `Documents` หรือหน้า Desktop
 
-### 2. ดับเบิลคลิก `install-mac.command`
+### 2. รัน `install-mac.command`
 
-macOS จะเปิดหน้าต่าง Terminal แล้วติดตั้งให้อัตโนมัติ (สร้าง `.venv`,
-ลง dependency, โหลดข้อมูลตัวอย่าง) รอจนขึ้นข้อความ **"ติดตั้งเสร็จแล้ว"**
+ไฟล์ที่แตกจาก zip ที่ดาวน์โหลดมาจะติดเครื่องหมาย quarantine ทำให้ macOS
+ไม่ยอมเปิดตอนดับเบิลคลิก และขึ้นกล่องเตือนว่า
 
-> **ถ้า macOS ขึ้นเตือนว่าเปิดไม่ได้** (เพราะไฟล์ดาวน์โหลดมาจากอินเทอร์เน็ต)
-> ให้ **คลิกขวา** ที่ไฟล์ → เลือก **Open** → กด **Open** ยืนยันอีกครั้ง
-> ทำแบบนี้ครั้งเดียวพอ ครั้งต่อไปดับเบิลคลิกได้ตามปกติ
->
-> หรือสั่งจาก Terminal ทีเดียว (cd ไปที่โฟลเดอร์ก่อน):
-> ```bash
-> xattr -dr com.apple.quarantine .
-> chmod +x install-mac.command start-mac.command run.sh
-> ```
+> **"install-mac.command" Not Opened** — Apple could not verify …
+
+**ถ้าเจอกล่องนี้ กด `Done` (ห้ามกด `Move to Trash`)** แล้วใช้วิธีใดวิธีหนึ่งข้างล่าง
+
+#### วิธี A — ผ่าน Terminal (ได้ผลแน่นอนทุกเวอร์ชัน แนะนำ)
+
+เปิด **Terminal** (กด `Command + Space` แล้วพิมพ์ `Terminal`)
+พิมพ์คำว่า `bash` เว้นวรรคหนึ่งที **แล้วลากไฟล์ `install-mac.command`
+จาก Finder มาวางในหน้าต่าง Terminal** จากนั้นกด `Enter`
+
+บรรทัดที่ได้จะหน้าตาประมาณนี้:
+
+```bash
+bash /Users/yourname/Downloads/paperless-aot/install-mac.command
+```
+
+การสั่งผ่าน `bash` ตรง ๆ ไม่ติด Gatekeeper เพราะข้อจำกัดมีเฉพาะตอนดับเบิลคลิกจาก Finder
+
+#### วิธี B — อนุญาตใน System Settings
+
+1. กด `Done` ในกล่องเตือน
+2. เปิด **System Settings → Privacy & Security**
+3. เลื่อนลงไปหาข้อความ `"install-mac.command" was blocked…` แล้วกด **Open Anyway**
+4. ใส่รหัสผ่านเครื่อง แล้วกลับไปดับเบิลคลิกไฟล์อีกครั้ง
+
+> macOS 15 (Sequoia) ขึ้นไป **ไม่มี**ทางลัด "คลิกขวา → Open" แล้ว
+> ต้องใช้วิธี A หรือ B เท่านั้น
+
+---
+
+เมื่อรันได้ ตัวติดตั้งจะทำให้อัตโนมัติทั้งหมด (สร้าง `.venv`, ลง dependency,
+โหลดข้อมูลตัวอย่าง, ปลดล็อก Gatekeeper ให้ไฟล์ที่เหลือ) รอจนขึ้นข้อความ
+**"ติดตั้งเสร็จแล้ว"** — หลังจากนี้ `start-mac.command` จะดับเบิลคลิกได้ตามปกติ
+
+หรือถ้าอยากปลดล็อกทั้งโฟลเดอร์เองก่อนเลยก็ได้:
+
+```bash
+cd /path/to/paperless-aot
+xattr -dr com.apple.quarantine .
+chmod +x install-mac.command start-mac.command run.sh
+```
 
 ### 3. ดับเบิลคลิก `start-mac.command`
 
@@ -67,8 +99,13 @@ python3 --version
 
 ## ปัญหาที่พบบ่อย
 
-**"install-mac.command" cannot be opened because it is from an unidentified developer**
-คลิกขวาที่ไฟล์ → Open → Open (ดูข้อ 2 ด้านบน)
+**"install-mac.command" Not Opened / cannot be opened because it is from an unidentified developer**
+กด `Done` แล้วดูวิธี A หรือ B ในข้อ 2 ด้านบน — อย่ากด `Move to Trash`
+(บน macOS 15 ขึ้นไป ทางลัด "คลิกขวา → Open" ถูกยกเลิกแล้ว)
+
+**เตือน Gatekeeper ซ้ำตอนเปิด `start-mac.command`**
+แปลว่า `install-mac.command` ยังไม่ได้รันสำเร็จ — ตัวติดตั้งจะปลดล็อกไฟล์ที่เหลือ
+ให้ตอนจบ ถ้ายังติดอยู่ให้สั่ง `xattr -dr com.apple.quarantine .` ในโฟลเดอร์นั้น
 
 **ติดตั้ง dependency ไม่ผ่าน / ค้างตอนดาวน์โหลด**
 เครื่องน่าจะต่อเน็ตไม่ได้หรืออยู่หลัง proxy ขององค์กร ลองสั่งจาก Terminal:

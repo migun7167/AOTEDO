@@ -99,6 +99,15 @@ say ""
 
 chmod +x "$ROOT/start-mac.command" "$ROOT/run.sh" 2>/dev/null
 
+# Files extracted from a downloaded zip carry com.apple.quarantine, which makes
+# macOS 15 refuse to launch them on double-click. Getting this far means the
+# user already cleared it for this script, so clear it for the rest of the
+# folder and start-mac.command opens normally from Finder.
+if xattr -dr com.apple.quarantine "$ROOT" 2>/dev/null; then
+  ok "ปลดล็อก Gatekeeper ให้ไฟล์ในโฟลเดอร์นี้แล้ว — start-mac.command ดับเบิลคลิกได้เลย"
+  say ""
+fi
+
 say "${GREEN}${BOLD}╭──────────────────────────────────────────────╮${OFF}"
 say "${GREEN}${BOLD}│   ติดตั้งเสร็จแล้ว                            │${OFF}"
 say "${GREEN}${BOLD}╰──────────────────────────────────────────────╯${OFF}"
