@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paperless AOT — FWB/FHL Matching Portal</title>
+<link rel="stylesheet" href="css/fonts.css">
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✈️</text></svg>">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 64 64" aria-label="AOT logo">
+        <defs>
+          <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#e9c46a"/>
+            <stop offset="0.5" stop-color="#c9a227"/>
+            <stop offset="1" stop-color="#9c7a1c"/>
+          </linearGradient>
+        </defs>
+        <circle cx="32" cy="32" r="30" fill="#0d2a5c"/>
+        <path d="M10 40 Q28 18 54 14 Q40 26 30 32 Q44 30 56 24 Q42 38 28 40 Q38 41 48 39 Q36 48 22 46 Q14 45 10 40Z" fill="url(#gold)"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-name">Paperless <b>AOT</b></span>
+        <span class="brand-sub">FWB / FHL Matching Portal</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="#/dashboard" data-route="dashboard"><span class="ic">▦</span> Dashboard</a>
+      <a href="#/import" data-route="import"><span class="ic">⇪</span> Import</a>
+      <a href="#/matches" data-route="matches"><span class="ic">⇄</span> Match Results</a>
+      <a href="#/rawdata" data-route="rawdata"><span class="ic">☰</span> Raw Data / Analysis</a>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="sys-chip" id="health-chip">● checking…</div>
+      <div class="ver">v1.0.0 · SQLite</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">Dashboard</h1>
+      <div class="topbar-right">
+        <input id="global-search" class="search" type="search"
+               placeholder="ค้นหา MAWB / HAWB / Flight…">
+        <div class="avatar" title="operator">OP</div>
+      </div>
+    </header>
+    <div id="view" class="view"></div>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# runtime database and test artifacts
+data/*.db
+backend/tests/*.db
+*.log
+node_modules/
+.DS_Store
