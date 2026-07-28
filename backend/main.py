@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sys
+from typing import Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -360,7 +361,9 @@ def review(mawb: str, body: ReviewBody, request: Request,
 
 
 class OverrideBody(BaseModel):
-    status: str | None = None   # RESOLVED, REJECTED or null to clear
+    # Optional[...] rather than "str | None": Pydantic resolves model
+    # annotations at runtime, and the newer syntax needs Python 3.10.
+    status: Optional[str] = None   # RESOLVED, REJECTED or null to clear
     reason: str = ""
 
 
