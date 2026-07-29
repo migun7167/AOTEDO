@@ -586,6 +586,11 @@ def create_delivery_order(mawb: str, fhl_id: str, body: DOBody, request: Request
                 number_start=settings["do_number_start"],
                 default_issued_by=settings["do_issued_by"],
                 shc_source=settings["do_shc_source"], amend=amend)
+        except do_service.DOReleaseError as e:
+            # The house is there; its goods are already released. That is a
+            # conflict with the ledger, not a missing record.
+            raise HTTPException(409, {"code": "DO_OVER_RELEASE",
+                                      "message": str(e)})
         except do_service.DOError as e:
             raise HTTPException(404, {"code": "DO_SOURCE_NOT_FOUND",
                                       "message": str(e)})

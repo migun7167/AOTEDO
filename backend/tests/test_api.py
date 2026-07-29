@@ -560,7 +560,9 @@ def test_split_and_part_delivery_endpoints(client, seeded):
 
     over = client.post(f"/api/v1/matches/{mawb}/houses/{ids[0]}/do",
                        json={"releasePieces": total})
-    assert over.status_code == 404
+    # The house is there — its goods are spoken for. That is 409, not 404.
+    assert over.status_code == 409
+    assert over.json()["code"] == "DO_OVER_RELEASE"
     assert "เหลือให้ปล่อยได้อีก" in over.json()["message"]
 
     audit = client.get("/api/v1/audit",

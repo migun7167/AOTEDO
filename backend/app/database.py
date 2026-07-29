@@ -307,12 +307,16 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
     do_type TEXT NOT NULL DEFAULT 'SINGLE',
     status TEXT NOT NULL DEFAULT 'ACTIVE',
     superseded_by TEXT,
-    split_from TEXT,
-    -- A combined DO leaves hawb_number NULL, and SQLite treats NULLs as
-    -- distinct, so this still stops two live single DOs for one house.
-    UNIQUE (mawb_number, hawb_number)
+    split_from TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_do_mawb ON delivery_orders(mawb_number);
+-- At most one *live* full release per house. The condition matters: a
+-- cancelled or superseded document has released nothing, so it must not keep
+-- holding the house's number hostage. Combined DOs and part deliveries leave
+-- hawb_number NULL and are governed by the release ledger instead.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_do_active_house
+    ON delivery_orders(mawb_number, hawb_number)
+    WHERE status = 'ACTIVE' AND hawb_number IS NOT NULL;
 
 -- One row per house waybill printed on a DO. A single DO has one; a combined
 -- DO has many, which is what lets one consignee collect several shipments
@@ -400,10 +404,54 @@ def init_db() -> None:
                         conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        _relax_do_house_constraint(conn)
         _backfill_do_lines(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _relax_do_house_constraint(conn: sqlite3.Connection) -> None:
+    """Replace the old unconditional UNIQUE(mawb, hawb) with a live-only index.
+
+    The original constraint was written when a house could only ever have one
+    DO. It outlived that rule: cancelling or superseding a document is supposed
+    to hand the house back, but the constraint kept the cancelled row's claim
+    on the number forever, so the house could never be released again.
+    """
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='delivery_orders'"
+    ).fetchone()
+    if not sql or "UNIQUE (mawb_number, hawb_number)" not in (sql["sql"] or ""):
+        return
+
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(delivery_orders)")]
+    names = ", ".join(columns)
+    indexes = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='delivery_orders'"
+    ) if not r["name"].startswith("sqlite_")]
+
+    # Both pragmas have to be set outside a transaction to take effect.
+    conn.commit()
+    # Without the legacy behaviour SQLite helpfully rewrites every foreign key
+    # that points here to say delivery_orders_old — including the one in
+    # delivery_order_lines, which would then reference a table we are about to
+    # drop. foreign_keys is off so the copy and drop are not policed midway.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    conn.execute("ALTER TABLE delivery_orders RENAME TO delivery_orders_old")
+    # Indexes follow the table under its new name and would collide with the
+    # ones SCHEMA is about to recreate.
+    for name in indexes:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    # Recreating from SCHEMA keeps one definition of the table in the codebase.
+    conn.executescript(SCHEMA)
+    conn.execute(f"INSERT INTO delivery_orders ({names}) SELECT {names} "
+                 "FROM delivery_orders_old")
+    conn.execute("DROP TABLE delivery_orders_old")
+    conn.commit()
+    conn.execute("PRAGMA legacy_alter_table = OFF")
+    conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _backfill_do_lines(conn: sqlite3.Connection) -> None:

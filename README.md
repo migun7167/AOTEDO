@@ -30,7 +30,7 @@ cd backend && python3 -m uvicorn main:app --port 8000
 รัน test:
 
 ```bash
-cd backend && python3 -m pytest tests/ -q      # 173 tests
+cd backend && python3 -m pytest tests/ -q      # 177 tests
 ```
 
 ### บัญชีเริ่มต้น
@@ -93,6 +93,18 @@ PBKDF2-HMAC-SHA256 120,000 รอบ พร้อม salt ต่อผู้ใ�
 | 217-08722689 | `MATCHED_WITH_TOLERANCE` (95) | น้ำหนักต่าง 0.2 KG อยู่ใน tolerance |
 | 217-08722690 | `MATCHED` (100) | 2 house ของผู้รับรายเดียวกัน — ใช้ลองรวมเป็น DO ใบเดียว |
 | — | `INVALID_FORMAT` | ไฟล์ที่ไม่ใช่ Cargo-IMP |
+
+อีกสองชุดวางไว้ให้ import เองผ่านหน้า Import ไม่ถูก seed อัตโนมัติ:
+
+| โฟลเดอร์ | MAWB | ไว้ทดสอบอะไร |
+|---|---|---|
+| `samples/testset/` | 217-08722700 | ชุด FWB + FHL x2 + FFM + FSU ที่ match 100 % (ขาออก BKK → NRT) |
+| `samples/splitset/` | 217-08722734 | ชุด 5 house ที่ match 100 % สำหรับทดสอบ **แยก DO** และ **ปล่อยของบางส่วน** |
+
+`splitset` จัด house ไว้ให้ครบทุกเคส — 3 house เป็นผู้รับรายเดียวกันแต่สะกดชื่อ
+บริษัทมาคนละแบบ (ทดสอบการรวมแล้วแยก 1 + 2), อีก 2 house เป็นผู้รับอีกราย และ
+house ที่ใหญ่ที่สุดมี 12 ชิ้น / 480 K หารเป็น 5 + 4 + 3 ได้พอดีสำหรับทยอยปล่อยของ
+รายละเอียดและขั้นตอนทดสอบอยู่ใน `samples/splitset/README.txt`
 
 ---
 
@@ -172,11 +184,12 @@ backend/
       settings_service.py    matching rule ที่ปรับได้จากหน้าจอ
       export_service.py      Excel / CSV / JSON / raw zip
       do_service.py          Delivery Order — mapping, Code 39, HTML และ PDF
-  tests/                     173 tests (parser, matching, API, RBAC, DO, combine, split, users)
+  tests/                     177 tests (parser, matching, API, RBAC, DO, combine, split, users)
 frontend/                    index.html + css/ + js/app.js + fonts/ (self-hosted)
 scripts/seed.py              โหลดข้อมูลตัวอย่าง
 scripts/fetch_fonts.py       ดาวน์โหลด web font มาเก็บในโปรเจกต์
-samples/                     ไฟล์ตัวอย่างจริง + demo/ ชุดสาธิต
+samples/                     ไฟล์ตัวอย่างจริง + demo/ ชุดสาธิต +
+                             testset/ และ splitset/ ชุดที่ match 100 %
 docs/                        design document ต้นทาง
 ```
 
@@ -323,9 +336,12 @@ house นั้น แล้วเทียบกับจำนวนใน FHL
 |---|---|
 | ออกใบเต็มจำนวนซ้ำ | ได้เลขเดิม + ลายน้ำ REPRINT (ไม่นับซ้ำในบัญชี) |
 | ปล่อยบางส่วนแล้วขอต่ออีกส่วน | ออกใบใหม่ได้จนกว่ายอดจะครบ |
-| ขอเกินยอดคงเหลือ | ปฏิเสธ พร้อมบอกว่าเหลือเท่าไรและใบไหนกินไปแล้ว |
+| ขอเกินยอดคงเหลือ | ปฏิเสธด้วย `409 DO_OVER_RELEASE` บอกว่าเหลือเท่าไร |
 | ของถูกปล่อยครบแล้ว | ปฏิเสธ พร้อมชื่อ DO ที่ปล่อยไป |
 | ใบถูก `CANCELLED` / `SUPERSEDED` | ยอดคืนเข้าบัญชีทันที ออกใหม่ได้ |
+
+การปฏิเสธเพราะของหมดเป็นคนละเรื่องกับการหา house ไม่เจอ ระบบจึงตอบ `409`
+(ของถูกจองไปแล้ว) ไม่ใช่ `404` (ไม่มีของชิ้นนี้)
 
 เฉพาะใบที่ปล่อย**เต็มจำนวน**เท่านั้นที่จองเลข HAWB ไว้บนหัวเอกสาร ใบปล่อยบางส่วน
 เว้นช่องนั้นว่าง หลายใบของ house เดียวกันจึงอยู่ร่วมกันได้

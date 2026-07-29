@@ -66,6 +66,14 @@ class DOError(Exception):
     pass
 
 
+class DOReleaseError(DOError):
+    """The house exists but cannot give up the quantity asked for.
+
+    Kept apart from DOError so the API can answer "conflict" rather than
+    "not found" — nothing is missing, the goods are simply already spoken for.
+    """
+
+
 # ------------------------------------------------------------- formatting ---
 
 def parse_imp_date(value: str | None, time_value: str | None = None
@@ -375,20 +383,20 @@ def check_release(conn: sqlite3.Connection, fhl_id: str,
                 WHERE l.fhl_id = ? AND d.status = 'ACTIVE'
                   {f"AND d.id NOT IN ({holes})" if excluded else ""}
                 ORDER BY d.do_number""", [fhl_id, *excluded]))
-        raise DOError(
+        raise DOReleaseError(
             f"{state['hawbNumber']} ปล่อยของครบแล้ว ({state['releasedPieces']} "
             f"จาก {state['totalPieces']} ชิ้น) ตาม DO {issued} "
             "ถ้าต้องการออกใหม่ ให้ยกเลิกใบเดิมก่อน")
     if want_pieces > state["remainingPieces"]:
-        raise DOError(
+        raise DOReleaseError(
             f"{state['hawbNumber']} เหลือให้ปล่อยได้อีก "
             f"{state['remainingPieces']} ชิ้น แต่ขอ {want_pieces} ชิ้น")
     if want_weight <= 0:
-        raise DOError(f"{state['hawbNumber']} น้ำหนักที่ขอปล่อยต้องมากกว่า 0")
+        raise DOReleaseError(f"{state['hawbNumber']} น้ำหนักที่ขอปล่อยต้องมากกว่า 0")
     # A rounding slack keeps a legitimate "release the rest" from tripping on
     # the third decimal of a float.
     if want_weight > state["remainingWeight"] + 0.001:
-        raise DOError(
+        raise DOReleaseError(
             f"{state['hawbNumber']} เหลือให้ปล่อยได้อีก "
             f"{state['remainingWeight']} {state['weightUnit'] or 'K'} "
             f"แต่ขอ {want_weight}")
@@ -871,6 +879,23 @@ def doc_lines(ctx: dict) -> list[dict]:
         "natureOfGoods")}]
 
 
+def row_measures(line: dict) -> tuple[str, str]:
+    """The "X of Y" pieces and weight a table row prints.
+
+    Both renderers ask here rather than deciding for themselves, because the
+    two comparisons look alike and drifted apart once already: a full release
+    is measured against the master waybill, exactly as on the carrier's own
+    form, while a part delivery is measured against the house it came out of —
+    the master total says nothing to someone collecting part of one house.
+    """
+    part = bool(line.get("isPartial"))
+    pieces = line.get("housePieces") if part else line.get("masterPieces")
+    weight = line.get("houseWeight") if part else line.get("masterWeight")
+    unit = line.get("weightUnit") or ""
+    return (f"{line.get('pieces')} of {pieces}",
+            f"{fmt_weight(line.get('weight'))} of {fmt_weight(weight)}{unit}")
+
+
 def _ctx_dates(ctx: dict) -> tuple:
     """Payloads come back from JSON with ISO strings, fresh ones with datetimes."""
     def coerce(value):
@@ -898,10 +923,8 @@ def render_html(ctx: dict) -> str:
                      or (line.get('mawbNumber') or '').replace('-', ''))}/<br>
           HAWB {_esc(line.get('hawbNumber'))}</td>
       <td class="c">{_esc(line.get('shc'))}</td>
-      <td class="c">{_esc(line.get('pieces'))} of {_esc(
-        line.get('housePieces') if line.get('isPartial') else line.get('masterPieces'))}</td>
-      <td class="c">{_esc(fmt_weight(line.get('weight')))} of {_esc(fmt_weight(
-        line.get('houseWeight') if line.get('isPartial') else line.get('masterWeight')))}{_esc(line.get('weightUnit'))}</td>
+      <td class="c">{_esc(row_measures(line)[0])}</td>
+      <td class="c">{_esc(row_measures(line)[1])}</td>
       <td class="c">{_esc(line.get('boardPoint'))}</td>
       <td class="c">{_esc(line.get('offPoint'))}</td>
       <td>{_esc(line.get('flightNumber'))}<br>{_esc(line.get('aircraftRegistration'))}</td>
@@ -1097,7 +1120,7 @@ def render_pdf(ctx: dict) -> bytes:
 
     y = height - 20 * mm
 
-    # barcode, right aligned
+    # barcode, right aligned — a combined DO has no single HAWB to carry
     barcode_value = str(ctx.get("hawbNumber") or ctx.get("doNumber") or "")
     bc = code39.Standard39(barcode_value, barHeight=13 * mm,
                            barWidth=0.5 * mm, checksum=0, quiet=0)
@@ -1185,18 +1208,23 @@ def render_pdf(ctx: dict) -> bytes:
         c.drawString(xs[0] + 1.5 * mm, body_top - 3.6 * mm,
                      f"HAWB {line.get('hawbNumber')}")
         line_landed = _as_dt(line.get("landedAt"))
+        part = line.get("isPartial")
+        pieces_text, weight_text = row_measures(line)
         for i, value in [
             (1, str(line.get("shc") or "")),
-            (2, f"{line.get('pieces')} of {line.get('masterPieces')}"),
-            (3, f"{fmt_weight(line.get('weight'))} of "
-                f"{fmt_weight(line.get('masterWeight'))}"
-                f"{line.get('weightUnit') or ''}"),
+            (2, pieces_text),
+            (3, weight_text),
             (4, str(line.get("boardPoint") or "")),
             (5, str(line.get("offPoint") or "")),
             (7, fmt_stamp(line_landed) if line_landed else ""),
             (8, str(line.get("natureOfGoods") or "")),
         ]:
             c.drawCentredString((xs[i] + xs[i + 1]) / 2, body_top, value)
+        if part:
+            c.setFont("Helvetica-Bold", 7)
+            c.drawCentredString((xs[8] + xs[9]) / 2, body_top - 3.6 * mm,
+                                "PART DELIVERY")
+            c.setFont("Helvetica", 7.5)
         c.drawString(xs[6] + 1.5 * mm, body_top,
                      str(line.get("flightNumber") or ""))
         c.drawString(xs[6] + 1.5 * mm, body_top - 3.6 * mm,
@@ -1218,6 +1246,21 @@ def render_pdf(ctx: dict) -> bytes:
         c.setFont("Helvetica", 7.5)
 
     y = top - head_h - body_h - 12 * mm
+
+    partial_lines = [x for x in lines if x.get("isPartial")]
+    if partial_lines:
+        balance = "; ".join(
+            f"{x.get('hawbNumber')} = {x.get('balancePieces')} pcs / "
+            f"{fmt_weight(x.get('balanceWeight'))}{x.get('weightUnit') or ''}"
+            for x in partial_lines)
+        c.setLineWidth(0.7)
+        c.rect(left, y - 3 * mm, usable, 8 * mm)
+        c.setFont("Helvetica-Bold", 7.5)
+        c.drawString(left + 2 * mm, y + 1.2 * mm,
+                     "PART DELIVERY — BALANCE REMAINING ON HOUSE:")
+        c.setFont("Helvetica", 7.5)
+        c.drawString(left + 62 * mm, y + 1.2 * mm, balance)
+        y -= 14 * mm
 
     carrier = ctx.get("carrierCode") or "the carrier"
     c.setFont("Helvetica-Bold", 8)

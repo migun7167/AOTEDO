@@ -184,6 +184,50 @@ class TestReleaseLedger:
         state = do_service.balance(conn, house(conn, "SP26070001"))
         assert state["remainingPieces"] == 12
 
+    def test_a_cancelled_full_release_can_be_issued_again(self, conn):
+        """The old UNIQUE(mawb, hawb) index outlived "one DO per house" and
+        kept a cancelled document's claim on the number forever."""
+        first = do_service.issue(conn, MAWB, house(conn, "SP26070001"),
+                                 "admin", number_start=5300001)
+        do_service.cancel(conn, first["doNumber"])
+        second = do_service.issue(conn, MAWB, house(conn, "SP26070001"),
+                                  "admin", number_start=5300001)
+        assert second["doNumber"] != first["doNumber"]
+        assert second["doType"] == "SINGLE"
+
+    def test_a_superseded_full_release_can_be_issued_again(self, conn):
+        """Splitting supersedes single documents too, so the same trap applies."""
+        first = do_service.issue(conn, MAWB, house(conn, "SP26070001"),
+                                 "admin", number_start=5300001)
+        combined = do_service.combine(
+            conn, [house(conn, "SP26070001"), house(conn, "SP26070002")],
+            "admin", supersede=True, number_start=5300001)
+        parts = do_service.split(
+            conn, combined["id"],
+            [[house(conn, "SP26070001")], [house(conn, "SP26070002")]],
+            "admin", number_start=5300001)
+        assert sorted(x["doType"] for x in parts["documents"]) \
+            == ["SINGLE", "SINGLE"]
+        for doc in parts["documents"]:
+            do_service.cancel(conn, doc["doNumber"])
+        again = do_service.issue(conn, MAWB, house(conn, "SP26070001"),
+                                 "admin", number_start=5300001)
+        assert again["doType"] == "SINGLE"
+
+    def test_over_release_is_its_own_error(self, conn):
+        """Callers answer "conflict" to this and "not found" to a bad id."""
+        do_service.issue(conn, MAWB, house(conn, "SP26070001"), "admin",
+                         overrides={"releasePieces": 5, "releaseWeight": 200.0},
+                         number_start=5300001)
+        with pytest.raises(do_service.DOReleaseError):
+            do_service.issue(conn, MAWB, house(conn, "SP26070001"), "admin",
+                             overrides={"releasePieces": 20, "releaseWeight": 700.0},
+                             number_start=5300001)
+        with pytest.raises(do_service.DOError) as bad:
+            do_service.issue(conn, MAWB, "no-such-house", "admin",
+                             number_start=5300001)
+        assert not isinstance(bad.value, do_service.DOReleaseError)
+
 
 class TestPartDelivery:
     def test_releases_part_and_keeps_the_balance(self, conn):
@@ -315,6 +359,15 @@ class TestPartDeliveryDocument:
     def test_pdf_renders(self, partial):
         pdf = do_service.render_pdf(partial)
         assert pdf[:5] == b"%PDF-"
+
+    def test_both_renderers_measure_a_row_the_same_way(self, partial):
+        """The PDF printed part deliveries against the master once; the two
+        renderers now share this decision so they cannot drift apart again."""
+        line = partial["lines"][0]
+        assert do_service.row_measures(line) == ("5 of 12", "200 of 500K")
+
+        full = dict(line, isPartial=False)
+        assert do_service.row_measures(full) == ("5 of 20", "200 of 800K")
 
     def test_a_full_release_says_nothing_about_parts(self, conn):
         """An ordinary DO must still print exactly like the carrier's own."""
