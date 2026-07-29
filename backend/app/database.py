@@ -307,6 +307,7 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
     do_type TEXT NOT NULL DEFAULT 'SINGLE',
     status TEXT NOT NULL DEFAULT 'ACTIVE',
     superseded_by TEXT,
+    split_from TEXT,
     -- A combined DO leaves hawb_number NULL, and SQLite treats NULLs as
     -- distinct, so this still stops two live single DOs for one house.
     UNIQUE (mawb_number, hawb_number)
@@ -324,10 +325,16 @@ CREATE TABLE IF NOT EXISTS delivery_order_lines (
     mawb_number TEXT,
     hawb_number TEXT,
     shc TEXT,
+    -- pieces/weight are what THIS document releases; house_* is everything the
+    -- house holds. They differ on a part delivery, where the balance stays
+    -- available for a later document.
     pieces INTEGER,
     master_pieces INTEGER,
+    house_pieces INTEGER,
     weight REAL,
     master_weight REAL,
+    house_weight REAL,
+    is_partial INTEGER NOT NULL DEFAULT 0,
     weight_unit TEXT,
     board_point TEXT,
     off_point TEXT,
@@ -377,6 +384,10 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("delivery_orders", "do_type", "TEXT NOT NULL DEFAULT 'SINGLE'"),
     ("delivery_orders", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
     ("delivery_orders", "superseded_by", "TEXT"),
+    ("delivery_orders", "split_from", "TEXT"),
+    ("delivery_order_lines", "house_pieces", "INTEGER"),
+    ("delivery_order_lines", "house_weight", "REAL"),
+    ("delivery_order_lines", "is_partial", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

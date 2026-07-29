@@ -166,8 +166,14 @@ def _next_do_number(conn: sqlite3.Connection, start: int) -> str:
 
 def build_context(conn: sqlite3.Connection, mawb: str, fhl_id: str,
                   overrides: dict | None = None,
-                  shc_source: str = "HOUSE") -> dict:
-    """Collect every field the DO prints, from the matched data."""
+                  shc_source: str = "HOUSE",
+                  exclude_do_ids: list[str] | None = None,
+                  validate: bool = True) -> dict:
+    """Collect every field the DO prints, from the matched data.
+
+    `validate` off computes the document without consulting the release ledger,
+    for callers that only want to look at what a DO would say.
+    """
     overrides = overrides or {}
 
     house = conn.execute(
@@ -216,18 +222,35 @@ def build_context(conn: sqlite3.Connection, mawb: str, fhl_id: str,
         except (ValueError, TypeError):
             sph = []
 
+    # A part delivery releases only some of the house; the rest stays available
+    # for a later document.
+    if validate:
+        release = check_release(conn, house["id"],
+                                overrides.get("releasePieces"),
+                                overrides.get("releaseWeight"), exclude_do_ids)
+    else:
+        state = balance(conn, house["id"], exclude_do_ids)
+        release = {**state, "releasePieces": house["pieces"],
+                   "releaseWeight": house["gross_weight"], "isPartial": False}
+
     line = {
         "mawbNumber": mawb,
         "mawbPlain": mawb.replace("-", ""),
         "hawbNumber": house["hawb_number"],
         "fhlId": house["id"],
         "shc": " ".join(sph),
-        "pieces": house["pieces"],
+        "pieces": release["releasePieces"],
+        "housePieces": house["pieces"],
         "masterPieces": (result["fwb_pieces"] if result else None) or (
             fwb["pieces"] if fwb else None),
-        "weight": house["gross_weight"],
+        "weight": release["releaseWeight"],
+        "houseWeight": house["gross_weight"],
         "masterWeight": (result["fwb_weight"] if result else None) or (
             fwb["gross_weight"] if fwb else None),
+        "isPartial": release["isPartial"],
+        "balancePieces": release["remainingPieces"] - release["releasePieces"],
+        "balanceWeight": round(
+            release["remainingWeight"] - release["releaseWeight"], 3),
         "weightUnit": house["weight_unit"] or (fwb["weight_unit"] if fwb else "K"),
         "boardPoint": origin or "",
         "offPoint": destination or "",
@@ -285,6 +308,95 @@ def active_do_for_house(conn: sqlite3.Connection, fhl_id: str):
            JOIN delivery_orders d ON d.id = l.do_id
            WHERE l.fhl_id = ? AND d.status = 'ACTIVE'
            LIMIT 1""", (fhl_id,)).fetchone()
+
+
+# ------------------------------------------------------------ release ledger ---
+
+def balance(conn: sqlite3.Connection, fhl_id: str,
+            exclude_do_ids: list[str] | None = None) -> dict:
+    """What is left of a house after the documents already released against it.
+
+    A part delivery releases some of a house now and leaves the rest for a
+    later document, so the rule is not "one DO per house" but "never release
+    more than the house holds".
+    """
+    house = conn.execute(
+        """SELECT id, hawb_number, mawb_number, pieces, gross_weight, weight_unit
+           FROM fhl_house WHERE id = ?""", (fhl_id,)).fetchone()
+    if not house:
+        raise DOError(f"ไม่พบ house {fhl_id}")
+
+    excluded = list(exclude_do_ids or [])
+    holes = ",".join("?" * len(excluded))
+    row = conn.execute(
+        f"""SELECT COALESCE(SUM(l.pieces), 0) p, COALESCE(SUM(l.weight), 0) w
+            FROM delivery_order_lines l
+            JOIN delivery_orders d ON d.id = l.do_id
+            WHERE l.fhl_id = ? AND d.status = 'ACTIVE'
+              {f"AND d.id NOT IN ({holes})" if excluded else ""}""",
+        [fhl_id, *excluded]).fetchone()
+
+    total_pieces = house["pieces"] or 0
+    total_weight = float(house["gross_weight"] or 0)
+    released_pieces = row["p"] or 0
+    released_weight = round(float(row["w"] or 0), 3)
+    return {
+        "fhlId": house["id"],
+        "hawbNumber": house["hawb_number"],
+        "mawbNumber": house["mawb_number"],
+        "weightUnit": house["weight_unit"],
+        "totalPieces": total_pieces,
+        "totalWeight": total_weight,
+        "releasedPieces": released_pieces,
+        "releasedWeight": released_weight,
+        "remainingPieces": total_pieces - released_pieces,
+        "remainingWeight": round(total_weight - released_weight, 3),
+        "fullyReleased": released_pieces >= total_pieces > 0,
+    }
+
+
+def check_release(conn: sqlite3.Connection, fhl_id: str,
+                  pieces: int | None, weight: float | None,
+                  exclude_do_ids: list[str] | None = None) -> dict:
+    """Validate a requested quantity against what the house has left."""
+    state = balance(conn, fhl_id, exclude_do_ids)
+    want_pieces = state["remainingPieces"] if pieces is None else int(pieces)
+    want_weight = (state["remainingWeight"] if weight is None
+                   else round(float(weight), 3))
+
+    # Nothing left at all is worth naming the documents that consumed it,
+    # whatever quantity was asked for.
+    if state["remainingPieces"] <= 0 or want_pieces <= 0:
+        excluded = list(exclude_do_ids or [])
+        holes = ",".join("?" * len(excluded))
+        issued = ", ".join(r["do_number"] for r in conn.execute(
+            f"""SELECT DISTINCT d.do_number FROM delivery_order_lines l
+                JOIN delivery_orders d ON d.id = l.do_id
+                WHERE l.fhl_id = ? AND d.status = 'ACTIVE'
+                  {f"AND d.id NOT IN ({holes})" if excluded else ""}
+                ORDER BY d.do_number""", [fhl_id, *excluded]))
+        raise DOError(
+            f"{state['hawbNumber']} ปล่อยของครบแล้ว ({state['releasedPieces']} "
+            f"จาก {state['totalPieces']} ชิ้น) ตาม DO {issued} "
+            "ถ้าต้องการออกใหม่ ให้ยกเลิกใบเดิมก่อน")
+    if want_pieces > state["remainingPieces"]:
+        raise DOError(
+            f"{state['hawbNumber']} เหลือให้ปล่อยได้อีก "
+            f"{state['remainingPieces']} ชิ้น แต่ขอ {want_pieces} ชิ้น")
+    if want_weight <= 0:
+        raise DOError(f"{state['hawbNumber']} น้ำหนักที่ขอปล่อยต้องมากกว่า 0")
+    # A rounding slack keeps a legitimate "release the rest" from tripping on
+    # the third decimal of a float.
+    if want_weight > state["remainingWeight"] + 0.001:
+        raise DOError(
+            f"{state['hawbNumber']} เหลือให้ปล่อยได้อีก "
+            f"{state['remainingWeight']} {state['weightUnit'] or 'K'} "
+            f"แต่ขอ {want_weight}")
+
+    partial = (want_pieces < state["totalPieces"]
+               or want_weight < state["totalWeight"] - 0.001)
+    return {**state, "releasePieces": want_pieces, "releaseWeight": want_weight,
+            "isPartial": partial}
 
 
 def check_combinable(conn: sqlite3.Connection, fhl_ids: list[str],
@@ -351,7 +463,8 @@ def build_combined_context(conn: sqlite3.Connection, fhl_ids: list[str],
     lines, header = [], None
     for house in houses:
         ctx = build_context(conn, house["mawb_number"], house["id"],
-                            overrides, shc_source)
+                            overrides, shc_source,
+                            exclude_do_ids=check["supersede"])
         header = header or ctx
         lines.append(ctx["lines"][0])
 
@@ -402,22 +515,42 @@ def issue(conn: sqlite3.Connection, mawb: str, fhl_id: str, user: str,
     `amend` rewrites an issued document from the current data and overrides
     while keeping its number — what a carrier does when a detail was wrong.
     """
-    ctx = build_context(conn, mawb, fhl_id, overrides, shc_source)
-    ctx["issuedBy"] = ctx["issuedBy"] or default_issued_by
+    house = conn.execute(
+        "SELECT hawb_number FROM fhl_house WHERE id = ? AND mawb_number = ?",
+        (fhl_id, mawb)).fetchone()
+    if not house:
+        raise DOError(f"ไม่พบ house {fhl_id} ใน MAWB {mawb}")
 
+    # Look for the existing document before building anything: a reprint must
+    # work even though the house now has nothing left to release.
     existing = conn.execute(
         """SELECT * FROM delivery_orders
            WHERE mawb_number = ? AND hawb_number = ? AND status = 'ACTIVE'""",
-        (mawb, ctx["hawbNumber"])).fetchone()
+        (mawb, house["hawb_number"])).fetchone()
 
-    if not existing:
-        # A combined DO already covering this house releases it; issuing a
-        # second single DO would let the same cargo out twice.
-        on_combined = active_do_for_house(conn, fhl_id)
-        if on_combined:
-            raise DOError(
-                f"house นี้อยู่บน DO รวมเลขที่ {on_combined['do_number']} แล้ว "
-                "ถ้าต้องการออกใบเดี่ยว ให้ยกเลิก DO รวมใบนั้นก่อน")
+    if existing and not amend:
+        conn.execute(
+            "UPDATE delivery_orders SET reprint_count = reprint_count + 1 WHERE id = ?",
+            (existing["id"],))
+        stored = json.loads(existing["payload"])
+        stored["doNumber"] = existing["do_number"]
+        stored["reprint"] = True
+        stored["reprintCount"] = existing["reprint_count"] + 1
+        return stored
+
+    # An amendment rewrites its own document, so its own quantity must not
+    # count against what the house has left.
+    ctx = build_context(conn, mawb, fhl_id, overrides, shc_source,
+                        exclude_do_ids=[existing["id"]] if existing else None)
+    ctx["issuedBy"] = ctx["issuedBy"] or default_issued_by
+
+    partial = bool(ctx["lines"][0].get("isPartial"))
+    ctx["doType"] = "PARTIAL" if partial else "SINGLE"
+
+    # Only a document that releases the entire house claims the HAWB on its
+    # header; part deliveries leave it null so several can coexist, and the
+    # UNIQUE(mawb, hawb) index still stops two full releases of one house.
+    header_hawb = None if partial else ctx["hawbNumber"]
 
     if existing and amend:
         ctx["doNumber"] = existing["do_number"]
@@ -440,16 +573,6 @@ def issue(conn: sqlite3.Connection, mawb: str, fhl_id: str, user: str,
         _replace_lines(conn, existing["id"], ctx)
         return json.loads(json.dumps(ctx, default=_json_default))
 
-    if existing:
-        conn.execute(
-            "UPDATE delivery_orders SET reprint_count = reprint_count + 1 WHERE id = ?",
-            (existing["id"],))
-        stored = json.loads(existing["payload"])
-        stored["doNumber"] = existing["do_number"]
-        stored["reprint"] = True
-        stored["reprintCount"] = existing["reprint_count"] + 1
-        return stored
-
     do_number = _next_do_number(conn, number_start)
     do_id = str(uuid.uuid4())
     ctx["doNumber"] = do_number
@@ -462,9 +585,9 @@ def issue(conn: sqlite3.Connection, mawb: str, fhl_id: str, user: str,
            (id, do_number, mawb_number, hawb_number, fhl_id, station, do_date,
             customer_code, consignee_name, flight_number, aircraft_registration,
             landed_at, expiry_at, issued_by, pieces, weight, payload,
-            created_by, created_at, reprint_count)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
-        (do_id, do_number, mawb, ctx["hawbNumber"], fhl_id, ctx["station"],
+            created_by, created_at, reprint_count, do_type, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,'ACTIVE')""",
+        (do_id, do_number, mawb, header_hawb, fhl_id, ctx["station"],
          ctx["doDate"].isoformat(timespec="seconds"), ctx["customerCode"],
          ctx["consignee"]["name"], ctx["flightNumber"],
          ctx["aircraftRegistration"],
@@ -472,7 +595,7 @@ def issue(conn: sqlite3.Connection, mawb: str, fhl_id: str, user: str,
          ctx["expiryAt"].isoformat(timespec="minutes") if ctx["expiryAt"] else None,
          ctx["issuedBy"], ctx["pieces"], ctx["weight"],
          json.dumps(ctx, default=_json_default), user,
-         datetime.now().isoformat(timespec="seconds")))
+         datetime.now().isoformat(timespec="seconds"), ctx["doType"]))
     _replace_lines(conn, do_id, ctx)
     return json.loads(json.dumps(ctx, default=_json_default))
 
@@ -484,14 +607,16 @@ def _replace_lines(conn: sqlite3.Connection, do_id: str, ctx: dict) -> None:
         conn.execute(
             """INSERT INTO delivery_order_lines
                (id, do_id, line_no, fhl_id, mawb_number, hawb_number, shc,
-                pieces, master_pieces, weight, master_weight, weight_unit,
-                board_point, off_point, flight_number, aircraft_registration,
-                landed_at, nature_of_goods)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                pieces, master_pieces, house_pieces, weight, master_weight,
+                house_weight, is_partial, weight_unit, board_point, off_point,
+                flight_number, aircraft_registration, landed_at, nature_of_goods)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (str(uuid.uuid4()), do_id, index, line.get("fhlId"),
              line.get("mawbNumber"), line.get("hawbNumber"), line.get("shc"),
-             line.get("pieces"), line.get("masterPieces"), line.get("weight"),
-             line.get("masterWeight"), line.get("weightUnit"),
+             line.get("pieces"), line.get("masterPieces"),
+             line.get("housePieces"), line.get("weight"),
+             line.get("masterWeight"), line.get("houseWeight"),
+             1 if line.get("isPartial") else 0, line.get("weightUnit"),
              line.get("boardPoint"), line.get("offPoint"),
              line.get("flightNumber"), line.get("aircraftRegistration"),
              landed.isoformat(timespec="minutes") if landed else None,
@@ -538,6 +663,118 @@ def combine(conn: sqlite3.Connection, fhl_ids: list[str], user: str,
                WHERE id = ?""", (do_id, old_id))
 
     return json.loads(json.dumps(ctx, default=_json_default))
+
+
+def split(conn: sqlite3.Connection, do_id: str, groups: list[list[str]],
+          user: str, overrides: dict | None = None, number_start: int = 5000001,
+          default_issued_by: str = "", shc_source: str = "HOUSE") -> dict:
+    """Break one DO into several, each covering part of its houses.
+
+    The original is superseded rather than edited: a release document that has
+    left the counter must stay readable exactly as it was printed, and the
+    replacements carry their own numbers.
+    """
+    row = conn.execute(
+        "SELECT * FROM delivery_orders WHERE id = ? OR do_number = ?",
+        (do_id, do_id)).fetchone()
+    if not row:
+        raise DOError(f"ไม่พบ Delivery Order {do_id}")
+    if row["status"] != "ACTIVE":
+        raise DOError(f"DO {row['do_number']} ถูกยกเลิกหรือถูกแทนที่ไปแล้ว")
+
+    current = [r["fhl_id"] for r in conn.execute(
+        "SELECT fhl_id FROM delivery_order_lines WHERE do_id = ? ORDER BY line_no",
+        (row["id"],))]
+    if len(current) < 2:
+        raise DOError(
+            f"DO {row['do_number']} มี house เดียว แยกไม่ได้ "
+            "ถ้าต้องการปล่อยของบางส่วน ให้ออก DO แบบระบุจำนวนแทน")
+
+    groups = [list(dict.fromkeys(g)) for g in groups if g]
+    if len(groups) < 2:
+        raise DOError("ต้องแบ่งอย่างน้อย 2 กลุ่ม")
+
+    flat = [fhl_id for group in groups for fhl_id in group]
+    if len(flat) != len(set(flat)):
+        raise DOError("มี house ซ้ำอยู่ในหลายกลุ่ม")
+    if set(flat) != set(current):
+        missing = set(current) - set(flat)
+        extra = set(flat) - set(current)
+        detail = []
+        if missing:
+            detail.append(f"ตกหล่น {len(missing)} ใบ")
+        if extra:
+            detail.append(f"มี house ที่ไม่ได้อยู่บน DO นี้ {len(extra)} ใบ")
+        raise DOError("house ที่แบ่งต้องครบทุกใบของ DO เดิมพอดี — " +
+                      " และ ".join(detail))
+
+    # Ignore the document being replaced while measuring what each house has
+    # left, otherwise every line would look already released.
+    replaced = [row["id"]]
+    issued = []
+    for group in groups:
+        if len(group) == 1:
+            house = conn.execute("SELECT mawb_number FROM fhl_house WHERE id = ?",
+                                 (group[0],)).fetchone()
+            ctx = build_context(conn, house["mawb_number"], group[0], overrides,
+                                shc_source, exclude_do_ids=replaced)
+            ctx["doType"] = ("PARTIAL" if ctx["lines"][0].get("isPartial")
+                             else "SINGLE")
+        else:
+            ctx = build_combined_context(conn, group, overrides, shc_source,
+                                         force_consignee=True, supersede=True)
+        ctx["issuedBy"] = ctx["issuedBy"] or default_issued_by
+        issued.append(_persist(conn, ctx, user, number_start,
+                               split_from=row["id"]))
+
+    conn.execute(
+        """UPDATE delivery_orders SET status = 'SUPERSEDED', superseded_by = ?
+           WHERE id = ?""", (issued[0]["id"], row["id"]))
+
+    return {"splitFrom": {"id": row["id"], "doNumber": row["do_number"]},
+            "documents": issued}
+
+
+def _persist(conn: sqlite3.Connection, ctx: dict, user: str, number_start: int,
+             split_from: str | None = None) -> dict:
+    """Write a freshly built context out as a new document."""
+    do_number = _next_do_number(conn, number_start)
+    do_id = str(uuid.uuid4())
+    ctx["doNumber"] = do_number
+    ctx["id"] = do_id
+    ctx["reprint"] = False
+    ctx["reprintCount"] = 0
+
+    combined = ctx["doType"] == "COMBINED"
+    header_hawb = (None if combined or ctx["lines"][0].get("isPartial")
+                   else ctx["lines"][0].get("hawbNumber"))
+    pieces = (ctx.get("totalPieces") if combined else ctx["lines"][0]["pieces"])
+    weight = (ctx.get("totalWeight") if combined else ctx["lines"][0]["weight"])
+
+    conn.execute(
+        """INSERT INTO delivery_orders
+           (id, do_number, mawb_number, hawb_number, fhl_id, station, do_date,
+            customer_code, consignee_name, flight_number, aircraft_registration,
+            landed_at, expiry_at, issued_by, pieces, weight, payload,
+            created_by, created_at, reprint_count, do_type, status, split_from)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,'ACTIVE',?)""",
+        (do_id, do_number, ctx["lines"][0]["mawbNumber"], header_hawb,
+         None if combined else ctx["lines"][0].get("fhlId"), ctx["station"],
+         ctx["doDate"].isoformat(timespec="seconds") if isinstance(
+             ctx["doDate"], datetime) else ctx["doDate"],
+         ctx["customerCode"], ctx["consignee"]["name"], ctx["flightNumber"],
+         ctx["aircraftRegistration"],
+         _iso(ctx.get("landedAt")), _iso(ctx.get("expiryAt")),
+         ctx["issuedBy"], pieces, weight,
+         json.dumps(ctx, default=_json_default), user,
+         datetime.now().isoformat(timespec="seconds"), ctx["doType"], split_from))
+    _replace_lines(conn, do_id, ctx)
+    return json.loads(json.dumps(ctx, default=_json_default))
+
+
+def _iso(value) -> str | None:
+    dt = _as_dt(value)
+    return dt.isoformat(timespec="minutes") if dt else None
 
 
 def cancel(conn: sqlite3.Connection, do_id: str) -> dict:
@@ -628,8 +865,10 @@ def doc_lines(ctx: dict) -> list[dict]:
         return ctx["lines"]
     return [{k: ctx.get(k) for k in (
         "mawbNumber", "mawbPlain", "hawbNumber", "shc", "pieces", "masterPieces",
-        "weight", "masterWeight", "weightUnit", "boardPoint", "offPoint",
-        "flightNumber", "aircraftRegistration", "landedAt", "natureOfGoods")}]
+        "housePieces", "weight", "masterWeight", "houseWeight", "isPartial",
+        "balancePieces", "balanceWeight", "weightUnit", "boardPoint",
+        "offPoint", "flightNumber", "aircraftRegistration", "landedAt",
+        "natureOfGoods")}]
 
 
 def _ctx_dates(ctx: dict) -> tuple:
@@ -659,17 +898,29 @@ def render_html(ctx: dict) -> str:
                      or (line.get('mawbNumber') or '').replace('-', ''))}/<br>
           HAWB {_esc(line.get('hawbNumber'))}</td>
       <td class="c">{_esc(line.get('shc'))}</td>
-      <td class="c">{_esc(line.get('pieces'))} of {_esc(line.get('masterPieces'))}</td>
-      <td class="c">{_esc(fmt_weight(line.get('weight')))} of {_esc(fmt_weight(line.get('masterWeight')))}{_esc(line.get('weightUnit'))}</td>
+      <td class="c">{_esc(line.get('pieces'))} of {_esc(
+        line.get('housePieces') if line.get('isPartial') else line.get('masterPieces'))}</td>
+      <td class="c">{_esc(fmt_weight(line.get('weight')))} of {_esc(fmt_weight(
+        line.get('houseWeight') if line.get('isPartial') else line.get('masterWeight')))}{_esc(line.get('weightUnit'))}</td>
       <td class="c">{_esc(line.get('boardPoint'))}</td>
       <td class="c">{_esc(line.get('offPoint'))}</td>
       <td>{_esc(line.get('flightNumber'))}<br>{_esc(line.get('aircraftRegistration'))}</td>
       <td class="c nowrap">{_esc(fmt_stamp(_as_dt(line.get('landedAt'))))}</td>
-      <td class="c">{_esc(line.get('natureOfGoods'))}</td>
+      <td class="c">{_esc(line.get('natureOfGoods'))}
+        {'<br><b>PART DELIVERY</b>' if line.get('isPartial') else ''}</td>
     </tr>""" for line in lines)
 
     # A single-line DO matches the carrier's own layout exactly, which has no
     # total row; only the combined form needs one.
+    partial_lines = [x for x in lines if x.get("isPartial")]
+    partial_note = f"""<div class="partial-note">
+      <b>PART DELIVERY</b> — เอกสารนี้ปล่อยของบางส่วน ยอดคงเหลือของ House:
+      {"; ".join(
+        f"{_esc(x.get('hawbNumber'))} เหลือ {_esc(x.get('balancePieces'))} ชิ้น / "
+        f"{_esc(fmt_weight(x.get('balanceWeight')))}{_esc(x.get('weightUnit') or '')}"
+        for x in partial_lines)}
+    </div>""" if partial_lines else ""
+
     total_html = f"""<tr class="total">
       <td>รวม {len(lines)} House</td><td></td>
       <td class="c">{_esc(ctx.get('totalPieces'))}</td>
@@ -727,6 +978,8 @@ def render_html(ctx: dict) -> str:
   table.do td.c {{ text-align: center; }}
   table.do td.nowrap {{ white-space: nowrap; }}
   table.do tr.total td {{ font-weight: bold; background: #f2f4f8; }}
+  .partial-note {{ border: 1px solid #000; padding: 7px 10px;
+    margin-bottom: 16px; font-size: 10.5px; }}
   .note {{ margin-bottom: 18px; }}
   .note b {{ display: inline-block; width: 56px; vertical-align: top; }}
   .note .body {{ display: inline-block; width: calc(100% - 60px); line-height: 1.9; font-weight: bold; }}
@@ -799,6 +1052,8 @@ def render_html(ctx: dict) -> str:
     </tr></thead>
     <tbody>{rows_html}{total_html}</tbody>
   </table>
+
+  {partial_note}
 
   <div class="note"><b>Note:</b><span class="body">In case the above details are
     incorrect, please contact {_esc(ctx.get('carrierCode'))} office for amendment

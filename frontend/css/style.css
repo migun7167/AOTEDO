@@ -367,3 +367,9 @@ pre.jsonview { background: #fff; border: 1px solid var(--line); color: #24344d; 
 .tl-body { font-size: .85rem; }
 .tl-body b { font-size: .9rem; }
 .tl-body .muted { color: var(--muted); font-size: .78rem; }
+
+/* ---------- Delivery Order balance ---------- */
+.balance-box {
+  background: var(--navy-100); border-radius: 10px; padding: 11px 14px;
+  font-size: .84rem; margin-bottom: 14px; line-height: 1.7;
+}

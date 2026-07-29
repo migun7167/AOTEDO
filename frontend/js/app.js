@@ -601,7 +601,15 @@ window.openDetail = async function (mawb) {
   show("Overview");
 };
 const kv = (k, v) => `<div class="item"><div class="k">${esc(k)}</div><div class="v">${v ?? "—"}</div></div>`;
-window.closeModal = () => { $("#modal-root").innerHTML = ""; };
+window.closeModal = () => {
+  $("#modal-root").innerHTML = "";
+  // Issuing a document changes the list underneath, so closing the result
+  // has to redraw it however the modal was dismissed.
+  if (window.__refreshOnClose) {
+    window.__refreshOnClose = false;
+    navigate();
+  }
+};
 document.addEventListener("keydown", (e) => {
   // A forced password change has no close button, so Escape must not skip it.
   if (e.key === "Escape" && $("#modal-root").innerHTML
@@ -775,6 +783,102 @@ window.openCombineDialog = (mawb, preset = null) => {
   };
 };
 
+window.togglePartFields = (maxPieces, maxWeight) => {
+  const on = $("#do-part").checked;
+  $("#do-part-fields").style.display = on ? "grid" : "none";
+  if (on && !$("#do-pieces").value) {
+    $("#do-pieces").value = maxPieces;
+    $("#do-weight").value = maxWeight;
+  }
+};
+
+/* ---------------- split a delivery order ---------------- */
+window.openSplitDialog = async (doId, doNumber) => {
+  let d;
+  try { d = await api(`/do?search=${encodeURIComponent(doNumber)}`); }
+  catch (e) { toast(e.message, true); return; }
+  const row = d.items.find(i => i.do_number === doNumber);
+  if (!row || row.line_count < 2) {
+    toast("DO ใบนี้มี house เดียว แยกไม่ได้ — ถ้าจะปล่อยของบางส่วน ใช้ 'ออก DO บางส่วน'", true);
+    return;
+  }
+  let lines;
+  try { lines = (await api(`/data/delivery_order_lines?filter=do_id:eq:${doId}&pageSize=100`)).rows; }
+  catch (e) { toast(e.message, true); return; }
+
+  $("#modal-root").innerHTML = `
+    <div class="modal-back" onclick="if(event.target===this){closeModal();navigate()}">
+      <div class="modal" style="max-width:720px">
+        <div class="modal-head"><h2>แยก DO <span class="mono">${esc(doNumber)}</span></h2>
+          <button class="close" onclick="closeModal();navigate()">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:.88rem;margin-bottom:6px">
+            เลือกว่า house ใบไหนจะอยู่บนเอกสารใบใหม่ ใบที่เหลือจะไปอยู่อีกใบหนึ่ง</p>
+          <p style="color:var(--muted);font-size:.82rem;margin-bottom:16px">
+            DO เดิมจะกลายเป็น <b>SUPERSEDED</b> และระบบออกเลข DO ใหม่ให้ทั้งสองใบ
+            เอกสารที่พิมพ์ออกไปแล้วยังอ่านย้อนหลังได้เหมือนเดิม</p>
+          <div class="tbl-wrap"><table class="tbl">
+            <thead><tr><th></th><th>HAWB</th><th>MAWB</th><th class="num">Pieces</th>
+              <th class="num">Weight</th><th>Nature of Goods</th></tr></thead>
+            <tbody>${lines.map(l => `<tr>
+              <td><input type="checkbox" class="sp-pick" value="${esc(l.fhl_id)}"
+                   onclick="updateSplitSummary()"></td>
+              <td class="mono"><b>${esc(l.hawb_number)}</b></td>
+              <td class="mono">${esc(l.mawb_number)}</td>
+              <td class="num">${l.pieces ?? "—"}</td>
+              <td class="num">${fmtW(l.weight)}</td>
+              <td>${esc(l.nature_of_goods || "—")}</td></tr>`).join("")}
+            </tbody></table></div>
+          <div id="sp-summary" style="margin-top:14px;font-size:.85rem;color:var(--muted)"></div>
+          <div class="setting-item" style="margin-top:14px">
+            <div class="k">เหตุผล</div>
+            <input type="text" id="sp-reason" placeholder="บันทึกลง audit log">
+          </div>
+          <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+            <button class="btn gold" id="sp-save" disabled>✂ แยกเป็น 2 ใบ</button>
+            <button class="btn" onclick="closeModal();navigate()">ยกเลิก</button>
+          </div>
+          <div id="sp-status" style="color:var(--err);font-size:.85rem;margin-top:12px;white-space:pre-wrap"></div>
+        </div></div></div>`;
+
+  window.__splitAll = lines.map(l => l.fhl_id);
+  updateSplitSummary();
+
+  $("#sp-save").onclick = async () => {
+    const picked = $$(".sp-pick").filter(c => c.checked).map(c => c.value);
+    const rest = window.__splitAll.filter(id => !picked.includes(id));
+    $("#sp-status").style.color = "var(--muted)";
+    $("#sp-status").textContent = "กำลังแยกเอกสาร…";
+    try {
+      const r = await api(`/do/${doId}/split`, jsonPost({
+        groups: [picked, rest], reason: $("#sp-reason").value.trim(),
+      }));
+      closeModal();
+      toast(`แยก DO ${r.splitFrom.doNumber} เป็น ` +
+            r.documents.map(x => x.doNumber).join(" และ ") + " แล้ว");
+      navigate();
+    } catch (e) {
+      $("#sp-status").style.color = "var(--err)";
+      $("#sp-status").textContent = e.message;
+    }
+  };
+};
+
+window.updateSplitSummary = () => {
+  const picked = $$(".sp-pick").filter(c => c.checked).length;
+  const total = ($$(".sp-pick") || []).length;
+  const rest = total - picked;
+  const ok = picked > 0 && rest > 0;
+  const btn = $("#sp-save");
+  if (btn) btn.disabled = !ok;
+  const summary = $("#sp-summary");
+  if (summary) {
+    summary.textContent = ok
+      ? `ใบใหม่ที่ 1: ${picked} house · ใบใหม่ที่ 2: ${rest} house`
+      : "เลือก house อย่างน้อย 1 ใบ และต้องเหลือไว้อีกอย่างน้อย 1 ใบ";
+  }
+};
+
 /* ---------------- delivery order ---------------- */
 window.openDoDialog = async (mawb, fhlId, hawb) => {
   // Prefill the ATA from the FSU arrival event when the message carried a time.
@@ -798,6 +902,10 @@ window.openDoDialog = async (mawb, fhlId, hawb) => {
     }
   } catch { /* the dialog still works without a prefill */ }
 
+  let bal = null;
+  try { bal = await api(`/do/houses/${fhlId}/balance`); } catch { /* optional */ }
+  const partly = bal && bal.releasedPieces > 0;
+
   $("#modal-root").innerHTML = `
     <div class="modal-back" onclick="if(event.target===this)openDetail('${esc(mawb)}')">
       <div class="modal" style="max-width:660px">
@@ -808,6 +916,24 @@ window.openDoDialog = async (mawb, fhlId, hawb) => {
             ทุกช่องที่เหลือดึงจากข้อมูลที่ match มาอัตโนมัติ
             ช่องด้านล่างคือส่วนที่ข้อความ Cargo-IMP ไม่มีข้อมูลให้ กรอกเพิ่มได้ตามต้องการ
           </p>
+          ${bal ? `<div class="balance-box">
+            <b>ยอดของ House นี้</b> — ทั้งหมด ${bal.totalPieces} ชิ้น /
+            ${fmtW(bal.totalWeight)}${esc(bal.weightUnit || "")}
+            ${partly ? `· ปล่อยไปแล้ว ${bal.releasedPieces} ชิ้น /
+              ${fmtW(bal.releasedWeight)} · <b>เหลือ ${bal.remainingPieces} ชิ้น /
+              ${fmtW(bal.remainingWeight)}</b>` : "· ยังไม่ได้ปล่อยเลย"}
+          </div>
+          <label class="cp-item" style="margin-bottom:14px">
+            <input type="checkbox" id="do-part" onclick="togglePartFields(${bal.remainingPieces}, ${bal.remainingWeight})">
+            ปล่อยของบางส่วน (Part Delivery) — ที่เหลือเก็บไว้ออก DO ใบหลัง</label>
+          <div class="settings-grid" id="do-part-fields" style="display:none;margin-bottom:14px">
+            <div class="setting-item"><div class="k">จำนวนที่ปล่อยครั้งนี้ (ชิ้น)</div>
+              <input type="number" id="do-pieces" min="1" max="${bal.remainingPieces}">
+              <div class="hint">สูงสุด ${bal.remainingPieces} ชิ้น</div></div>
+            <div class="setting-item"><div class="k">น้ำหนักที่ปล่อยครั้งนี้</div>
+              <input type="number" id="do-weight" step="0.1" min="0.1" max="${bal.remainingWeight}">
+              <div class="hint">สูงสุด ${fmtW(bal.remainingWeight)}${esc(bal.weightUnit || "")}</div></div>
+          </div>` : ""}
           <div class="settings-grid">
             <div class="setting-item"><div class="k">Landed on / ATA</div>
               <input type="datetime-local" id="do-landed" value="${esc(landed)}">
@@ -843,6 +969,10 @@ window.openDoDialog = async (mawb, fhlId, hawb) => {
           customerCode: $("#do-cust").value.trim(),
           issuedBy: $("#do-issuer").value.trim(),
           amend: $("#do-amend")?.checked || false,
+          releasePieces: $("#do-part")?.checked
+            ? Number($("#do-pieces").value) || null : null,
+          releaseWeight: $("#do-part")?.checked
+            ? Number($("#do-weight").value) || null : null,
         }));
       showDoResult(mawb, r);
       toast(r.amended ? `แก้ไข DO ${r.doNumber} แล้ว (เลขเดิม)`
@@ -853,6 +983,7 @@ window.openDoDialog = async (mawb, fhlId, hawb) => {
 };
 
 function showDoResult(mawb, r) {
+  window.__refreshOnClose = !mawb;
   $("#modal-root").innerHTML = `
     <div class="modal-back" onclick="if(event.target===this)openDetail('${esc(mawb)}')">
       <div class="modal" style="max-width:640px">
@@ -874,6 +1005,10 @@ function showDoResult(mawb, r) {
               ? kv("รวมทั้งใบ", `${esc(r.totalPieces)} ชิ้น / ${esc(r.totalWeight)} ${esc(r.weightUnit || "")}`)
               : kv("Pieces", `${esc(r.pieces)} of ${esc(r.masterPieces)}`)
                 + kv("Weight", `${esc(r.weight)} of ${esc(r.masterWeight)}${esc(r.weightUnit)}`)}
+            ${r.lines?.[0]?.isPartial
+              ? kv("ปล่อยครั้งนี้", `${esc(r.lines[0].pieces)} จาก ${esc(r.lines[0].housePieces)} ชิ้น`)
+                + kv("คงเหลือ", `${esc(r.lines[0].balancePieces)} ชิ้น / ${esc(r.lines[0].balanceWeight)}`)
+              : ""}
             ${kv("Landed / ATA", esc((r.landedAt || "—").replace("T", " ")))}
             ${kv("หมดอายุ (48 ชม.)", esc((r.expiryAt || "—").replace("T", " ")))}
           </div>
@@ -1231,6 +1366,8 @@ async function renderDeliveryOrders(params) {
           <td style="white-space:nowrap">
             <button class="btn sm" onclick="window.open('${API}/do/${esc(r.id)}/preview','_blank')">พิมพ์</button>
             <button class="btn sm" onclick="window.open('${API}/do/${esc(r.id)}/pdf','_blank')">PDF</button>
+            ${canImport() && r.status === "ACTIVE" && r.line_count > 1
+              ? `<button class="btn sm" onclick="openSplitDialog('${esc(r.id)}','${esc(r.do_number)}')">✂ แยก</button>` : ""}
             ${isAdmin() && r.status === "ACTIVE"
               ? `<button class="btn sm" onclick="cancelDo('${esc(r.id)}','${esc(r.do_number)}')">ยกเลิก</button>` : ""}
           </td></tr>`).join("")}

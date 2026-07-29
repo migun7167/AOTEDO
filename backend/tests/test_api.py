@@ -517,6 +517,73 @@ def test_combine_endpoints(client, seeded):
     assert cancelled.json()["status"] == "CANCELLED"
 
 
+def test_split_and_part_delivery_endpoints(client, seeded):
+    """217-08722690 carries two houses for one consignee."""
+    detail = client.get("/api/v1/matches/217-08722690").json()
+    ids = [h["id"] for h in detail["houses"]]
+
+    combined = client.post("/api/v1/do/combine", json={"fhlIds": ids}).json()
+    assert combined["doType"] == "COMBINED"
+
+    # split it back into one document per house
+    r = client.post(f"/api/v1/do/{combined['id']}/split", json={
+        "groups": [[ids[0]], [ids[1]]], "reason": "two brokers collecting"})
+    assert r.status_code == 200
+    split = r.json()
+    assert len(split["documents"]) == 2
+    assert split["splitFrom"]["doNumber"] == combined["doNumber"]
+
+    listed = client.get("/api/v1/do", params={"search": "217-08722690"}).json()
+    by_number = {i["do_number"]: i for i in listed["items"]}
+    assert by_number[combined["doNumber"]]["status"] == "SUPERSEDED"
+    assert all(by_number[d["doNumber"]]["status"] == "ACTIVE"
+               for d in split["documents"])
+
+    # a house on a live document has nothing left to release
+    bal = client.get(f"/api/v1/do/houses/{ids[0]}/balance").json()
+    assert bal["remainingPieces"] == 0
+    assert bal["fullyReleased"] is True
+
+    # cancel one, then release it in two parts
+    first = next(d for d in split["documents"]
+                 if d["lines"][0]["fhlId"] == ids[0])
+    client.post(f"/api/v1/do/{first['id']}/cancel", json={"reason": "re-do"})
+    bal = client.get(f"/api/v1/do/houses/{ids[0]}/balance").json()
+    total = bal["totalPieces"]
+    assert bal["remainingPieces"] == total
+
+    mawb = detail["result"]["mawb_number"]
+    part = client.post(f"/api/v1/matches/{mawb}/houses/{ids[0]}/do", json={
+        "releasePieces": 1, "releaseWeight": 10.0}).json()
+    assert part["doType"] == "PARTIAL"
+    assert part["lines"][0]["balancePieces"] == total - 1
+
+    over = client.post(f"/api/v1/matches/{mawb}/houses/{ids[0]}/do",
+                       json={"releasePieces": total})
+    assert over.status_code == 404
+    assert "เหลือให้ปล่อยได้อีก" in over.json()["message"]
+
+    audit = client.get("/api/v1/audit",
+                       params={"eventType": "SPLIT_DELIVERY_ORDER"}).json()
+    assert audit["total"] >= 1
+
+
+def test_split_rejects_a_bad_group_set(client, seeded):
+    """Build a combined DO of its own so this does not lean on test order."""
+    detail = client.get("/api/v1/matches/217-08722686").json()
+    ids = [h["id"] for h in detail["houses"]]
+    combined = client.post("/api/v1/do/combine", json={
+        "fhlIds": ids, "forceConsignee": True}).json()
+    assert combined.get("doNumber"), combined
+
+    r = client.post(f"/api/v1/do/{combined['id']}/split",
+                    json={"groups": [["not-a-house"], ["also-not"]]})
+    assert r.status_code == 400
+    assert r.json()["code"] == "DO_NOT_SPLITTABLE"
+
+    client.post(f"/api/v1/do/{combined['id']}/cancel", json={"reason": "test"})
+
+
 def test_combine_overrides_need_admin(client):
     operator = as_role("operator")
     detail = operator.get("/api/v1/matches/217-08722686").json()

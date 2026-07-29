@@ -30,7 +30,7 @@ cd backend && python3 -m uvicorn main:app --port 8000
 รัน test:
 
 ```bash
-cd backend && python3 -m pytest tests/ -q      # 145 tests
+cd backend && python3 -m pytest tests/ -q      # 173 tests
 ```
 
 ### บัญชีเริ่มต้น
@@ -65,7 +65,8 @@ cd backend && python3 -m pytest tests/ -q      # 145 tests
 | Manual link / unlink FHL | ✓ | | |
 | Resolve / Reject (override สถานะ) | ✓ | | |
 | ตั้งค่า Matching Rule | ✓ | | |
-| ออก Delivery Order (เดี่ยว / รวม) | ✓ | ✓ | |
+| ออก Delivery Order (เดี่ยว / รวม / บางส่วน) | ✓ | ✓ | |
+| แยก DO รวมออกเป็นหลายใบ | ✓ | ✓ | |
 | ข้ามกฎผู้รับ / แทนที่ / ยกเลิก DO | ✓ | | |
 | แก้ไข DO ที่ออกไปแล้ว | ✓ | | |
 | พิมพ์ DO ที่ออกแล้ว | ✓ | ✓ | ✓ |
@@ -171,7 +172,7 @@ backend/
       settings_service.py    matching rule ที่ปรับได้จากหน้าจอ
       export_service.py      Excel / CSV / JSON / raw zip
       do_service.py          Delivery Order — mapping, Code 39, HTML และ PDF
-  tests/                     145 tests (parser, matching, API, RBAC, DO, combine, users)
+  tests/                     173 tests (parser, matching, API, RBAC, DO, combine, split, users)
 frontend/                    index.html + css/ + js/app.js + fonts/ (self-hosted)
 scripts/seed.py              โหลดข้อมูลตัวอย่าง
 scripts/fetch_fonts.py       ดาวน์โหลด web font มาเก็บในโปรเจกต์
@@ -224,8 +225,10 @@ Administrator link/unlink house ได้จากแท็บ Houses โดย�
 
 ## Delivery Order
 
-DO เป็นเอกสารระดับ house — หนึ่งใบต่อหนึ่ง HAWB ออกได้จากปุ่ม **🧾 สร้าง DO**
-ในแท็บ Houses ของหน้ารายละเอียด MAWB
+DO เป็นเอกสารระดับ house ออกได้จากปุ่ม **🧾 สร้าง DO** ในแท็บ Houses ของหน้า
+รายละเอียด MAWB — ปกติหนึ่งใบต่อหนึ่ง HAWB แต่รวมหลาย house ไว้ใบเดียว
+([Combine](#รวมหลาย-house-ไว้ใน-do-ใบเดียว-combine)) หรือแยก/ทยอยปล่อยของ
+([Split & Part Delivery](#แยก-do-split-และการปล่อยของบางส่วน-part-delivery)) ก็ได้
 
 ทุกช่องบนเอกสารเติมจากข้อมูลที่ match มาแล้ว:
 
@@ -235,7 +238,7 @@ DO เป็นเอกสารระดับ house — หนึ่งใบ
 | Station | เมืองของสนามบินปลายทาง (BKK → BANGKOK) |
 | CNEE + ที่อยู่ | consignee จาก FHL พร้อมรหัสไปรษณีย์และชื่อประเทศ |
 | Air Waybill No | MAWB (ไม่มีขีด) และ HAWB |
-| Pieces / Weight | ของ house เทียบกับของ master — `1 of 1`, `149 of 149K` |
+| Pieces / Weight | ของ house เทียบกับของ master — `1 of 1`, `149 of 149K` (ใบปล่อยบางส่วนเทียบกับของ house แทน) |
 | Brd. Pnt / Off. Pnt | origin / destination |
 | Flight No | เที่ยวบินจาก FWB เติมศูนย์เป็น 4 หลัก (TG601 → TG0601) |
 | Landed on Date/ATA | FSU เหตุการณ์ RCF หรือ ARR (เลือกใบที่มีเวลานาฬิกาก่อน) |
@@ -282,13 +285,50 @@ DO เป็นเอกสารระดับ house — หนึ่งใบ
   ก่อนที่ผู้รับจะมารับได้
 - มีแถว TOTAL รวมจำนวนชิ้นและน้ำหนักท้ายตาราง
 
-**การกันของออกซ้ำ:** 1 house อยู่บน DO ที่ ACTIVE ได้ใบเดียวเท่านั้น ถ้า house
-อยู่บน DO รวมแล้ว จะออกใบเดี่ยวซ้ำไม่ได้ ใบที่ถูกแทนที่จะเปลี่ยนสถานะเป็น
-`SUPERSEDED` ส่วน Administrator ยกเลิก (`CANCELLED`) ใบไหนก็ได้เพื่อปลด house
-ให้กลับมาออกใหม่ได้
-
 ช่อง SHC บนเอกสารต้นแบบเว้นว่าง ระบบจึงเว้นว่างเป็นค่าเริ่มต้น (`do_shc_source = HOUSE`)
 ถ้าต้องการให้พิมพ์ SPH ของใบแม่ (เช่น HEA SPX) เปลี่ยนเป็น `MASTER` ในหน้า Settings
+
+### แยก DO (Split) และการปล่อยของบางส่วน (Part Delivery)
+
+คำว่า "แยก DO" ในงานจริงหมายถึงสองเรื่องคนละแบบ ระบบทำไว้ทั้งสองอย่าง
+
+**1. แยกตาม house** — DO รวมที่ออกไปแล้วต้องแตกออกเป็นหลายใบ เพราะผู้รับส่ง
+ตัวแทนมารับคนละคน หรือของบางส่วนติดพิธีการศุลกากร กดปุ่ม **✂ แยก** ในหน้า
+Delivery Orders (ขึ้นเฉพาะใบที่มีมากกว่า 1 house) แล้วติ๊กว่า house ใบไหนไป
+เอกสารใหม่ใบที่ 1 ส่วนที่เหลือรวมเป็นใบที่ 2 โดยอัตโนมัติ
+
+- ต้องแบ่งให้ครบ — house ทุกใบบนเอกสารเดิมต้องไปอยู่ในกลุ่มใดกลุ่มหนึ่ง
+  ไม่มีตกหล่นและไม่ซ้ำ (ปุ่มบันทึกจะยังกดไม่ได้ถ้าเหลือกลุ่มว่าง)
+- กลุ่มที่ได้ house เดียวออกมาเป็น DO เดี่ยว กลุ่มที่ได้ตั้งแต่ 2 ใบยังเป็น DO รวม
+- ใบใหม่ทุกใบได้**เลข DO ใหม่** ส่วนใบเดิมเปลี่ยนเป็น `SUPERSEDED` ไม่ถูกแก้ทับ
+  เอกสารปล่อยของที่ออกจากเคาน์เตอร์ไปแล้วต้องอ่านย้อนได้ตรงกับที่พิมพ์ไป
+- แต่ละใบใหม่บันทึก `split_from` ชี้กลับไปที่ใบเดิม และ audit log เก็บเหตุผลที่กรอก
+
+**2. ปล่อยบางส่วน (part delivery)** — house ใบเดียวแต่ผู้รับมารับไม่หมดในครั้งเดียว
+ในกล่องสร้าง DO ติ๊ก "ปล่อยของบางส่วน" แล้วกรอกจำนวนชิ้น/น้ำหนักที่ปล่อยรอบนี้
+กล่องจะแสดงยอดคงเหลือของ house ให้เห็นก่อนเสมอ
+
+- ช่อง Pieces / Weight บนเอกสารเปลี่ยนไปเทียบกับ**ของ house** แทนของ master
+  (`1 of 4`, `40 of 160K`) เพราะเลข master ไม่บอกอะไรกับคนที่รับของบางส่วน
+- ช่อง Nature of Goods ต่อท้ายด้วย **PART DELIVERY** และมีกล่องสรุปยอดคงเหลือ
+  ใต้ตาราง ("ยอดคงเหลือของ House: UC26070040 เหลือ 3 ชิ้น / 120K")
+- DO เต็มจำนวนยังพิมพ์เหมือนเดิมทุกตัวอักษร — เทียบกับ master และไม่มีคำว่า
+  PART DELIVERY (มี test ตรึงไว้)
+
+**บัญชีของที่ปล่อยแล้ว** แทนกฎเดิม "1 house ต่อ 1 DO" ด้วยกฎที่ตรงกับงานจริงกว่า:
+*ปล่อยรวมกันเกินที่ house มีไม่ได้* ระบบรวมยอดจาก DO ที่ยัง ACTIVE ทุกใบของ
+house นั้น แล้วเทียบกับจำนวนใน FHL
+
+| สถานการณ์ | ผลลัพธ์ |
+|---|---|
+| ออกใบเต็มจำนวนซ้ำ | ได้เลขเดิม + ลายน้ำ REPRINT (ไม่นับซ้ำในบัญชี) |
+| ปล่อยบางส่วนแล้วขอต่ออีกส่วน | ออกใบใหม่ได้จนกว่ายอดจะครบ |
+| ขอเกินยอดคงเหลือ | ปฏิเสธ พร้อมบอกว่าเหลือเท่าไรและใบไหนกินไปแล้ว |
+| ของถูกปล่อยครบแล้ว | ปฏิเสธ พร้อมชื่อ DO ที่ปล่อยไป |
+| ใบถูก `CANCELLED` / `SUPERSEDED` | ยอดคืนเข้าบัญชีทันที ออกใหม่ได้ |
+
+เฉพาะใบที่ปล่อย**เต็มจำนวน**เท่านั้นที่จองเลข HAWB ไว้บนหัวเอกสาร ใบปล่อยบางส่วน
+เว้นช่องนั้นว่าง หลายใบของ house เดียวกันจึงอยู่ร่วมกันได้
 
 ## Duplicate
 
@@ -325,7 +365,9 @@ DO เป็นเอกสารระดับ house — หนึ่งใบ
 | POST | `/api/v1/matches/{mawb}/houses/{id}/do` | ออก / พิมพ์ซ้ำ / แก้ไข DO | admin, operator (แก้ไข = admin) |
 | GET | `/api/v1/do/combinable` | ผู้รับที่มีของหลาย house และยังไม่มี DO | ทุกบทบาท |
 | POST | `/api/v1/do/combine` | ออก DO รวมหลาย house | admin, operator (ข้ามกฎ = admin) |
-| POST | `/api/v1/do/{id}/cancel` | ยกเลิก DO เพื่อปลด house | admin |
+| POST | `/api/v1/do/{id}/split` | แยก DO รวมออกเป็นหลายใบตาม house | admin, operator |
+| GET | `/api/v1/do/houses/{id}/balance` | ยอดคงเหลือของ house และใบที่ปล่อยไปแล้ว | ทุกบทบาท |
+| POST | `/api/v1/do/{id}/cancel` | ยกเลิก DO เพื่อคืนยอดให้ house | admin |
 | GET | `/api/v1/do` | รายการ DO ที่ออกแล้ว | ทุกบทบาท |
 | GET | `/api/v1/do/{id}/preview` \| `/pdf` | หน้าพิมพ์ HTML / ไฟล์ PDF | ทุกบทบาท |
 | GET | `/api/v1/errors` \| `/history` | หน้า Errors / History | ทุกบทบาท |

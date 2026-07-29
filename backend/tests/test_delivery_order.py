@@ -107,7 +107,7 @@ class TestFieldsMatchTheCarrierDO:
 
     def test_shc_from_master_when_configured(self, conn, house_id):
         ctx = do_service.build_context(conn, "217-08722685", house_id,
-                                       shc_source="MASTER")
+                                       shc_source="MASTER", validate=False)
         assert ctx["shc"] == "HEA SPX"
 
 
@@ -228,7 +228,8 @@ class TestHelpers:
         assert 'width="' in svg
 
     def test_unknown_airline_prefix_degrades_gracefully(self, conn, house_id):
-        ctx = do_service.build_context(conn, "217-08722685", house_id)
+        ctx = do_service.build_context(conn, "217-08722685", house_id,
+                                       validate=False)
         assert ctx["carrierName"]          # 217 is known
         code, name, terminal = do_service.CARRIERS.get(
             "999", do_service.DEFAULT_CARRIER)

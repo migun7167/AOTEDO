@@ -212,7 +212,7 @@ class TestCombinedDocument:
 
     def test_a_house_cannot_be_released_twice(self, conn):
         """A single DO for a house already on a combined DO is refused."""
-        with pytest.raises(do_service.DOError, match="DO รวม"):
+        with pytest.raises(do_service.DOError, match="ปล่อยของครบแล้ว"):
             do_service.issue(conn, "217-08722750", house(conn, "AA26070001"),
                              "admin", number_start=5200001)
 

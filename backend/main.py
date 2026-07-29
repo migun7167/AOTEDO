@@ -562,6 +562,9 @@ class DOBody(BaseModel):
     station: str = ""
     doDate: str = ""
     amend: bool = False            # rewrite an issued DO, keeping its number
+    # A part delivery releases only some of the house now; omit for all of it.
+    releasePieces: Optional[int] = None
+    releaseWeight: Optional[float] = None
 
 
 @app.post("/api/v1/matches/{mawb}/houses/{fhl_id}/do")
@@ -647,6 +650,50 @@ def combine_delivery_order(body: CombineBody, request: Request,
                          "forcedConsignee": force},
                   reason=body.reason, ip=ip, user_agent=ua)
     return do
+
+
+class SplitBody(DOBody):
+    groups: list[list[str]] = []
+    reason: str = ""
+
+
+@app.get("/api/v1/do/houses/{fhl_id}/balance")
+def house_balance(fhl_id: str, user: dict = Depends(any_user)):
+    """What is left of a house after the documents already released on it."""
+    with db() as conn:
+        try:
+            return do_service.balance(conn, fhl_id)
+        except do_service.DOError as e:
+            raise HTTPException(404, {"code": "NOT_FOUND", "message": str(e)})
+
+
+@app.post("/api/v1/do/{do_id}/split")
+def split_delivery_order(do_id: str, body: SplitBody, request: Request,
+                         user: dict = Depends(can_import)):
+    """Break a DO into several, each covering some of its houses."""
+    payload = body.model_dump()
+    groups = payload.pop("groups", [])
+    payload.pop("amend", None)
+    reason = payload.pop("reason", "")
+    overrides = {k: v for k, v in payload.items() if v}
+
+    with db() as conn:
+        settings = settings_service.get_all(conn)
+        try:
+            result = do_service.split(
+                conn, do_id, groups, user["username"], overrides,
+                number_start=settings["do_number_start"],
+                default_issued_by=settings["do_issued_by"],
+                shc_source=settings["do_shc_source"])
+        except do_service.DOError as e:
+            raise HTTPException(400, {"code": "DO_NOT_SPLITTABLE",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "SPLIT_DELIVERY_ORDER", user["username"],
+                  "delivery_orders", result["splitFrom"]["doNumber"],
+                  after={"into": [d["doNumber"] for d in result["documents"]]},
+                  reason=reason, ip=ip, user_agent=ua)
+    return result
 
 
 @app.post("/api/v1/do/{do_id}/cancel")
@@ -919,10 +966,12 @@ EXPLORER_TABLES: dict[str, list[str]] = {
                         "consignee_name", "flight_number",
                         "aircraft_registration", "landed_at", "expiry_at",
                         "issued_by", "pieces", "weight", "created_by",
-                        "created_at", "reprint_count", "superseded_by"],
+                        "created_at", "reprint_count", "superseded_by",
+                        "split_from"],
     "delivery_order_lines": ["id", "do_id", "line_no", "fhl_id", "mawb_number",
                              "hawb_number", "shc", "pieces", "master_pieces",
-                             "weight", "master_weight", "weight_unit",
+                             "house_pieces", "weight", "master_weight",
+                             "house_weight", "is_partial", "weight_unit",
                              "board_point", "off_point", "flight_number",
                              "aircraft_registration", "landed_at",
                              "nature_of_goods"],
