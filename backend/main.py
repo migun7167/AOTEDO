@@ -65,9 +65,9 @@ class LoginBody(BaseModel):
 
 @app.post("/api/v1/auth/login")
 def login(body: LoginBody, request: Request, response: Response):
+    ip, ua = client_info(request)
     with db() as conn:
-        user, token = auth_service.login(conn, body.username, body.password)
-        ip, ua = client_info(request)
+        user, token = auth_service.login(conn, body.username, body.password, ip)
         svc.audit(conn, "LOGIN", user["username"], "users", user["id"],
                   after={"role": user["role"]}, ip=ip, user_agent=ua)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
@@ -88,13 +88,108 @@ def me(user: dict = Depends(any_user)):
     return {"user": user}
 
 
+class PasswordBody(BaseModel):
+    currentPassword: str
+    newPassword: str
+
+
+@app.post("/api/v1/auth/password")
+def change_own_password(body: PasswordBody, request: Request,
+                        response: Response, user: dict = Depends(any_user)):
+    """Any signed-in user changes their own password; all sessions are dropped."""
+    with db() as conn:
+        try:
+            auth_service.change_password(conn, user["id"], body.currentPassword,
+                                         body.newPassword)
+        except auth_service.PasswordError as e:
+            raise HTTPException(400, {"code": "WEAK_PASSWORD",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "CHANGE_PASSWORD", user["username"], "users",
+                  user["id"], ip=ip, user_agent=ua)
+    response.delete_cookie(SESSION_COOKIE)
+    return {"status": "PASSWORD_CHANGED", "reloginRequired": True}
+
+
 @app.get("/api/v1/users")
 def list_users(user: dict = Depends(admin_only)):
     with db() as conn:
         rows = conn.execute(
-            """SELECT id, username, display_name, role, active, created_at,
-                      last_login_at FROM users ORDER BY username""").fetchall()
+            """SELECT id, username, display_name, role, active,
+                      must_change_password, created_at, last_login_at
+               FROM users ORDER BY username""").fetchall()
     return {"items": [dict(r) for r in rows]}
+
+
+class NewUserBody(BaseModel):
+    username: str
+    password: str
+    role: str
+    displayName: str = ""
+
+
+@app.post("/api/v1/users")
+def add_user(body: NewUserBody, request: Request,
+             user: dict = Depends(admin_only)):
+    with db() as conn:
+        try:
+            created = auth_service.create_user(
+                conn, body.username, body.password, body.role, body.displayName)
+        except auth_service.PasswordError as e:
+            raise HTTPException(400, {"code": "INVALID_USER",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "CREATE_USER", user["username"], "users",
+                  created["id"], after={"username": created["username"],
+                                        "role": created["role"]},
+                  ip=ip, user_agent=ua)
+    return created
+
+
+class UpdateUserBody(BaseModel):
+    role: Optional[str] = None
+    active: Optional[bool] = None
+    displayName: Optional[str] = None
+
+
+@app.patch("/api/v1/users/{user_id}")
+def edit_user(user_id: str, body: UpdateUserBody, request: Request,
+              user: dict = Depends(admin_only)):
+    with db() as conn:
+        before = conn.execute(
+            "SELECT username, role, active FROM users WHERE id = ?",
+            (user_id,)).fetchone()
+        try:
+            auth_service.update_user(conn, user_id, user, body.role,
+                                     body.active, body.displayName)
+        except auth_service.PasswordError as e:
+            raise HTTPException(400, {"code": "INVALID_USER",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "UPDATE_USER", user["username"], "users", user_id,
+                  before=dict(before) if before else None,
+                  after=body.model_dump(exclude_none=True), ip=ip, user_agent=ua)
+    return {"id": user_id}
+
+
+class ResetPasswordBody(BaseModel):
+    newPassword: str
+
+
+@app.post("/api/v1/users/{user_id}/password")
+def reset_user_password(user_id: str, body: ResetPasswordBody, request: Request,
+                        user: dict = Depends(admin_only)):
+    """Admin sets a password; the account must change it at next sign-in."""
+    with db() as conn:
+        try:
+            auth_service.reset_password(conn, user_id, body.newPassword)
+        except auth_service.PasswordError as e:
+            raise HTTPException(400, {"code": "WEAK_PASSWORD",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "RESET_PASSWORD", user["username"], "users", user_id,
+                  ip=ip, user_agent=ua)
+    return {"id": user_id, "mustChangePassword": True}
 
 
 # ---------------------------------------------------------------- imports ---
@@ -766,7 +861,8 @@ EXPLORER_TABLES: dict[str, list[str]] = {
                        "source_channel", "total_files", "success_files",
                        "failed_files", "status"],
     "audit_logs": ["id", "event_type", "user_id", "entity_type", "entity_id",
-                   "reason", "created_at"],
+                   "reason", "ip_address", "created_at"],
+    "login_attempts": ["id", "username", "ip_address", "success", "created_at"],
 }
 
 FILTER_OPS = {

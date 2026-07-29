@@ -55,11 +55,13 @@ const routes = {
   dashboard: renderDashboard, import: renderImport, matches: renderMatches,
   rawdata: renderRawData, errors: renderErrors, history: renderHistory,
   audit: renderAudit, settings: renderSettings, do: renderDeliveryOrders,
+  users: renderUsers,
 };
 const titles = {
   dashboard: "Dashboard", import: "Import Messages", matches: "Match Results",
   rawdata: "Raw Data / Analysis", errors: "Errors", history: "Match History",
   audit: "Audit Log", settings: "Settings", do: "Delivery Orders",
+  users: "Users",
 };
 
 function navigate() {
@@ -579,7 +581,9 @@ window.openDetail = async function (mawb) {
 const kv = (k, v) => `<div class="item"><div class="k">${esc(k)}</div><div class="v">${v ?? "—"}</div></div>`;
 window.closeModal = () => { $("#modal-root").innerHTML = ""; };
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && $("#modal-root").innerHTML) closeModal();
+  // A forced password change has no close button, so Escape must not skip it.
+  if (e.key === "Escape" && $("#modal-root").innerHTML
+      && !CURRENT_USER?.mustChangePassword) closeModal();
 });
 window.toastCopy = () => toast("คัดลอกแล้ว");
 window.doRematch = async (mawb) => {
@@ -1331,6 +1335,180 @@ async function renderSettings() {
   }
 }
 
+/* ---------------- users page ---------------- */
+const ROLE_BADGE = {
+  ADMINISTRATOR: "err", OPERATOR: "warn", VIEWER: "info",
+};
+
+async function renderUsers() {
+  const v = $("#view");
+  v.innerHTML = `<div class="empty">Loading…</div>`;
+  let d;
+  try { d = await api("/users"); }
+  catch (e) { v.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+
+  v.innerHTML = `
+    <div class="panel">
+      <div class="filter-bar">
+        <h2 style="margin:0">ผู้ใช้ในระบบ (${d.items.length})</h2>
+        <div class="spacer"></div>
+        <button class="btn gold sm" id="u-new">+ เพิ่มผู้ใช้</button>
+      </div>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Username</th><th>ชื่อ</th><th>บทบาท</th><th>สถานะ</th>
+          <th>เข้าใช้ล่าสุด</th><th>สร้างเมื่อ</th><th></th></tr></thead>
+        <tbody>${d.items.map(u => `<tr>
+          <td class="mono"><b>${esc(u.username)}</b>${
+            u.username === CURRENT_USER.username
+              ? ' <span class="badge muted">คุณ</span>' : ""}</td>
+          <td>${esc(u.display_name || "—")}</td>
+          <td><span class="badge ${ROLE_BADGE[u.role] || "muted"}">${esc(u.role)}</span></td>
+          <td>${u.active ? '<span class="badge ok">ใช้งาน</span>'
+                         : '<span class="badge muted">ปิดใช้งาน</span>'}
+              ${u.must_change_password
+                ? ' <span class="badge warn" title="ต้องตั้งรหัสผ่านใหม่ตอนเข้าระบบ">ต้องเปลี่ยนรหัส</span>' : ""}</td>
+          <td>${fmtD(u.last_login_at)}</td>
+          <td>${fmtD(u.created_at)}</td>
+          <td style="white-space:nowrap">
+            <button class="btn sm" onclick="editUser('${esc(u.id)}','${esc(u.username)}','${esc(u.role)}',${u.active ? 1 : 0})">แก้ไข</button>
+            <button class="btn sm" onclick="resetUserPassword('${esc(u.id)}','${esc(u.username)}')">ตั้งรหัสใหม่</button>
+          </td></tr>`).join("")}
+        </tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>สิทธิ์ของแต่ละบทบาท</h2>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>บทบาท</th><th>ทำอะไรได้</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge err">ADMINISTRATOR</span></td>
+            <td style="white-space:normal">ทุกอย่าง — Import, Re-match, Manual link/unlink,
+              Resolve/Reject, ตั้งค่า Matching Rule, จัดการผู้ใช้, แก้ไข DO, ดู Audit Log</td></tr>
+          <tr><td><span class="badge warn">OPERATOR</span></td>
+            <td style="white-space:normal">Import, Mark as Reviewed, ออก DO, Export
+              และดูข้อมูลทุกหน้ายกเว้น Audit Log กับ Users</td></tr>
+          <tr><td><span class="badge info">VIEWER</span></td>
+            <td style="white-space:normal">ดูอย่างเดียว + Export และพิมพ์ DO ที่ออกแล้ว</td></tr>
+        </tbody></table></div>
+    </div>`;
+
+  $("#u-new").onclick = () => {
+    $("#modal-root").innerHTML = `
+      <div class="modal-back" onclick="if(event.target===this)closeModal()">
+        <div class="modal" style="max-width:560px">
+          <div class="modal-head"><h2>เพิ่มผู้ใช้ใหม่</h2>
+            <button class="close" onclick="closeModal()">✕</button></div>
+          <div class="modal-body">
+            <div class="settings-grid">
+              <div class="setting-item"><div class="k">Username</div>
+                <input type="text" id="nu-name" placeholder="a-z 0-9 . _ - (3-32 ตัว)">
+                <div class="hint">ใช้เข้าระบบ เปลี่ยนภายหลังไม่ได้</div></div>
+              <div class="setting-item"><div class="k">ชื่อที่แสดง</div>
+                <input type="text" id="nu-display" placeholder="เช่น สมชาย ใจดี"></div>
+              <div class="setting-item"><div class="k">บทบาท</div>
+                <select id="nu-role">
+                  <option value="OPERATOR">OPERATOR</option>
+                  <option value="VIEWER">VIEWER</option>
+                  <option value="ADMINISTRATOR">ADMINISTRATOR</option>
+                </select></div>
+              <div class="setting-item"><div class="k">รหัสผ่านชั่วคราว</div>
+                <input type="text" id="nu-pass" placeholder="อย่างน้อย 8 ตัว มีตัวอักษร+ตัวเลข">
+                <div class="hint">ผู้ใช้ต้องตั้งรหัสใหม่ตอนเข้าระบบครั้งแรก</div></div>
+            </div>
+            <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+              <button class="btn gold" id="nu-save">สร้างผู้ใช้</button>
+              <button class="btn" onclick="closeModal()">ยกเลิก</button>
+              <span id="nu-status" style="color:var(--err);font-size:.85rem"></span>
+            </div>
+          </div></div></div>`;
+    $("#nu-save").onclick = async () => {
+      try {
+        await api("/users", jsonPost({
+          username: $("#nu-name").value.trim(),
+          displayName: $("#nu-display").value.trim(),
+          role: $("#nu-role").value,
+          password: $("#nu-pass").value,
+        }));
+        closeModal();
+        toast("สร้างผู้ใช้แล้ว");
+        renderUsers();
+      } catch (e) { $("#nu-status").textContent = e.message; }
+    };
+  };
+}
+
+window.editUser = async (id, username, role, active) => {
+  const newRole = prompt(
+    `บทบาทของ ${username} (ADMINISTRATOR / OPERATOR / VIEWER):`, role);
+  if (newRole === null) return;
+  const body = { role: newRole.trim().toUpperCase() };
+  if (confirm(active ? `ปิดการใช้งานบัญชี ${username} ด้วยหรือไม่?`
+                     : `เปิดใช้งานบัญชี ${username} ด้วยหรือไม่?`)) {
+    body.active = !active;
+  }
+  try {
+    await api(`/users/${id}`, { ...jsonPost(body), method: "PATCH" });
+    toast(`อัปเดต ${username} แล้ว`);
+    renderUsers();
+  } catch (e) { toast(e.message, true); }
+};
+
+window.resetUserPassword = async (id, username) => {
+  const pass = prompt(`ตั้งรหัสผ่านชั่วคราวให้ ${username}\n` +
+                      "(อย่างน้อย 8 ตัว มีทั้งตัวอักษรและตัวเลข):");
+  if (!pass) return;
+  try {
+    await api(`/users/${id}/password`, jsonPost({ newPassword: pass }));
+    toast(`ตั้งรหัสใหม่ให้ ${username} แล้ว — ผู้ใช้ต้องเปลี่ยนตอนเข้าระบบ`);
+    renderUsers();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* ---------------- password change ---------------- */
+window.openPasswordDialog = (forced = false) => {
+  $("#modal-root").innerHTML = `
+    <div class="modal-back" ${forced ? "" : 'onclick="if(event.target===this)closeModal()"'}>
+      <div class="modal" style="max-width:520px">
+        <div class="modal-head"><h2>${forced ? "ต้องตั้งรหัสผ่านใหม่" : "เปลี่ยนรหัสผ่าน"}</h2>
+          ${forced ? "" : '<button class="close" onclick="closeModal()">✕</button>'}</div>
+        <div class="modal-body">
+          ${forced ? `<p style="color:var(--warn);font-size:.88rem;margin-bottom:16px;font-weight:600">
+            บัญชีนี้ยังใช้รหัสผ่านเริ่มต้นที่ประกาศไว้ในเอกสาร
+            ต้องตั้งรหัสใหม่ก่อนจึงจะใช้งานระบบได้</p>` : ""}
+          <div class="settings-grid">
+            <div class="setting-item"><div class="k">รหัสผ่านเดิม</div>
+              <input type="password" id="pw-current" autocomplete="current-password"></div>
+            <div class="setting-item"><div class="k">รหัสผ่านใหม่</div>
+              <input type="password" id="pw-new" autocomplete="new-password">
+              <div class="hint">อย่างน้อย 8 ตัว มีทั้งตัวอักษรและตัวเลข</div></div>
+            <div class="setting-item"><div class="k">ยืนยันรหัสผ่านใหม่</div>
+              <input type="password" id="pw-confirm" autocomplete="new-password"></div>
+          </div>
+          <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+            <button class="btn gold" id="pw-save">บันทึกรหัสผ่าน</button>
+            ${forced ? "" : '<button class="btn" onclick="closeModal()">ยกเลิก</button>'}
+            <span id="pw-status" style="color:var(--err);font-size:.85rem"></span>
+          </div>
+        </div></div></div>`;
+
+  $("#pw-save").onclick = async () => {
+    const next = $("#pw-new").value;
+    if (next !== $("#pw-confirm").value) {
+      $("#pw-status").textContent = "รหัสผ่านใหม่ทั้งสองช่องไม่ตรงกัน";
+      return;
+    }
+    try {
+      await api("/auth/password", jsonPost({
+        currentPassword: $("#pw-current").value, newPassword: next,
+      }));
+      closeModal();
+      $("#view").innerHTML = "";
+      showLogin("เปลี่ยนรหัสผ่านแล้ว กรุณาเข้าสู่ระบบใหม่");
+    } catch (e) { $("#pw-status").textContent = e.message; }
+  };
+};
+
+$("#btn-password").addEventListener("click", () => openPasswordDialog(false));
+
 /* ---------------- auth ---------------- */
 function showLogin(message = "") {
   CURRENT_USER = null;
@@ -1349,6 +1527,8 @@ function applyUser(user) {
     a.hidden = !!allowed && !allowed.split(",").includes(user.role);
   });
   navigate();
+  // A seeded or reset account cannot be used until its password is replaced.
+  if (user.mustChangePassword) openPasswordDialog(true);
 }
 
 $("#login-form").addEventListener("submit", async (e) => {

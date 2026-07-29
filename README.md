@@ -30,7 +30,7 @@ cd backend && python3 -m uvicorn main:app --port 8000
 รัน test:
 
 ```bash
-cd backend && python3 -m pytest tests/ -q      # 91 tests
+cd backend && python3 -m pytest tests/ -q      # 117 tests
 ```
 
 ### บัญชีเริ่มต้น
@@ -41,8 +41,15 @@ cd backend && python3 -m pytest tests/ -q      # 91 tests
 | `operator` | `operator123` | OPERATOR |
 | `viewer` | `viewer123` | VIEWER |
 
-บัญชีเหล่านี้สร้างอัตโนมัติตอน database ว่างเปล่า **ต้องเปลี่ยนรหัสผ่านก่อนใช้งานจริง**
-(ดูหัวข้อ "ก่อนขึ้น production" ท้ายไฟล์)
+บัญชีเหล่านี้สร้างอัตโนมัติตอน database ว่างเปล่า และ **ระบบบังคับให้ตั้งรหัสผ่านใหม่
+ตอนเข้าระบบครั้งแรก** — ปิดหน้าต่างหรือกด Escape ข้ามไม่ได้ รหัสที่ประกาศไว้ข้างบน
+จึงใช้ได้ครั้งเดียวเท่านั้น
+
+รหัสผ่านใหม่ต้องยาวอย่างน้อย 8 ตัว มีทั้งตัวอักษรและตัวเลข ไม่ซ้ำชื่อผู้ใช้
+และไม่อยู่ในรายการรหัสที่เดาง่าย (รวมรหัสเริ่มต้นทั้งสามข้างบน)
+
+ใส่รหัสผิดเกิน 5 ครั้งใน 15 นาที บัญชีนั้นจะถูกล็อกชั่วคราว (นับแยกรายบัญชี)
+ทุกครั้งที่ลองเข้าระบบถูกบันทึกไว้ในตาราง `login_attempts` ดูได้จากหน้า Raw Data
 
 ---
 
@@ -62,6 +69,8 @@ cd backend && python3 -m pytest tests/ -q      # 91 tests
 | แก้ไข DO ที่ออกไปแล้ว | ✓ | | |
 | พิมพ์ DO ที่ออกแล้ว | ✓ | ✓ | ✓ |
 | ดู Audit Log | ✓ | | |
+| จัดการผู้ใช้ (เพิ่ม / เปลี่ยนบทบาท / ปิดใช้งาน / ตั้งรหัสใหม่) | ✓ | | |
+| เปลี่ยนรหัสผ่านของตัวเอง | ✓ | ✓ | ✓ |
 
 Session เก็บใน cookie แบบ HttpOnly อายุ 12 ชั่วโมง รหัสผ่าน hash ด้วย
 PBKDF2-HMAC-SHA256 120,000 รอบ พร้อม salt ต่อผู้ใช้
@@ -108,7 +117,7 @@ airline prefix, flight, FWB version, มี/ไม่มี duplicate, ช่ว
 - **Parsed** — JSON ที่ parse ได้
 - **History** — ทุกการเปลี่ยนสถานะ
 
-**Raw Data / Analysis** — ดูตารางดิบทั้ง 12 ตารางจาก database
+**Raw Data / Analysis** — ดูตารางดิบทั้ง 14 ตารางจาก database
 - ต่อเงื่อนไขได้ไม่จำกัด รวมแบบ **AND หรือ OR**
 - operator: `= ≠ contains starts-with > ≥ < ≤ is-empty not-empty`
 - ช่องกรอกค่ามี dropdown แนะนำค่าที่มีจริงในคอลัมน์นั้น (พร้อมจำนวนแถว)
@@ -126,6 +135,13 @@ match ได้ ดูรายละเอียดหัวข้อถัด�
 **History** — ไทม์ไลน์การเปลี่ยนสถานะทุก MAWB กรองด้วย MAWB ได้
 
 **Audit Log** (admin) — ทุก write action พร้อม user, before/after, เหตุผล และ IP
+
+**Users** (admin) — เพิ่มผู้ใช้ เปลี่ยนบทบาท ปิด/เปิดการใช้งาน และตั้งรหัสผ่านใหม่ให้
+ผู้ใช้ (ผู้ใช้คนนั้นต้องเปลี่ยนเองอีกครั้งตอนเข้าระบบ) ระบบกันไม่ให้ปิดบัญชีตัวเอง
+และกันไม่ให้เหลือระบบไว้โดยไม่มี Administrator ที่ใช้งานได้เลย
+
+ทุกบทบาทเปลี่ยนรหัสผ่านตัวเองได้จากปุ่ม 🔑 มุมขวาบน — เปลี่ยนแล้ว session ทั้งหมด
+ของบัญชีนั้นถูกยกเลิก ต้องเข้าระบบใหม่
 
 **Settings** — ปรับ tolerance, คะแนนแต่ละกฎ, severity, version ที่รองรับ และ
 ขนาดไฟล์สูงสุด กดบันทึกแล้วระบบ re-match ทุก MAWB ใหม่ทันทีและบันทึก audit log
@@ -153,7 +169,7 @@ backend/
       settings_service.py    matching rule ที่ปรับได้จากหน้าจอ
       export_service.py      Excel / CSV / JSON / raw zip
       do_service.py          Delivery Order — mapping, Code 39, HTML และ PDF
-  tests/                     91 tests (parser, matching, API, RBAC, DO)
+  tests/                     117 tests (parser, matching, API, RBAC, DO, users)
 frontend/                    index.html + css/ + js/app.js + fonts/ (self-hosted)
 scripts/seed.py              โหลดข้อมูลตัวอย่าง
 scripts/fetch_fonts.py       ดาวน์โหลด web font มาเก็บในโปรเจกต์
@@ -255,6 +271,10 @@ DO เป็นเอกสารระดับ house — หนึ่งใบ
 |---|---|---|---|
 | POST | `/api/v1/auth/login` \| `/logout` | เข้า/ออกระบบ | — |
 | GET | `/api/v1/auth/me` | ผู้ใช้ปัจจุบัน | ทุกบทบาท |
+| POST | `/api/v1/auth/password` | เปลี่ยนรหัสผ่านตัวเอง | ทุกบทบาท |
+| GET/POST | `/api/v1/users` | ดู / เพิ่มผู้ใช้ | admin |
+| PATCH | `/api/v1/users/{id}` | เปลี่ยนบทบาท / เปิด-ปิดใช้งาน | admin |
+| POST | `/api/v1/users/{id}/password` | ตั้งรหัสผ่านใหม่ให้ผู้ใช้ | admin |
 | POST | `/api/v1/imports/files` \| `/text` | นำเข้าไฟล์ / paste | admin, operator |
 | GET | `/api/v1/imports/{batchId}` | รายละเอียด batch | ทุกบทบาท |
 | GET | `/api/v1/matches` | list + filter + pagination | ทุกบทบาท |
@@ -295,12 +315,11 @@ bound parameter เสมอ — ตาราง/คอลัมน์นอก�
 
 โปรเจกต์นี้ทำครบ Phase 1–2 ของ design document สิ่งที่ยังต้องทำก่อนใช้งานจริง:
 
-1. **เปลี่ยนรหัสผ่านบัญชีเริ่มต้นทั้งสาม** — ตอนนี้รหัสอยู่ในโค้ดและแสดงบนหน้า login
-   เพื่อความสะดวกตอนสาธิต ยังไม่มีหน้าจัดการผู้ใช้/เปลี่ยนรหัสผ่าน ต้องแก้ผ่าน
-   database โดยตรงหรือเพิ่มหน้าจอก่อน
-2. **ให้บริการผ่าน HTTPS** แล้วเปิด flag `secure` ของ session cookie
+1. **ให้บริการผ่าน HTTPS** แล้วเปิด flag `secure` ของ session cookie
    (`SESSION_COOKIE` ใน `backend/app/services/auth.py`)
-3. **ย้ายไป PostgreSQL** ถ้าต้องรองรับ concurrent write สูง — schema ออกแบบตาม
+2. **ย้ายไป PostgreSQL** ถ้าต้องรองรับ concurrent write สูง — schema ออกแบบตาม
    เอกสารเดิมไว้แล้ว
-4. ยังไม่ได้ทำ: rate limiting, antivirus scan hook, การเข้ารหัสข้อมูลที่ rest
+3. **ลบหรือปิดบัญชีสาธิต** ที่ไม่ได้ใช้ (operator / viewer) จากหน้า Users
+4. ยังไม่ได้ทำ: antivirus scan hook, การเข้ารหัสข้อมูลที่ rest
    และการรับข้อมูลทาง SFTP / message queue (Phase 3 ในเอกสาร)
+   ส่วน rate limiting ตอนนี้มีเฉพาะหน้า login ยังไม่ได้ครอบ API อื่น

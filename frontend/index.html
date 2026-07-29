@@ -37,6 +37,7 @@
       <a href="#/errors" data-route="errors"><span class="ic">⚠</span> Errors</a>
       <a href="#/history" data-route="history"><span class="ic">◷</span> History</a>
       <a href="#/audit" data-route="audit" data-roles="ADMINISTRATOR"><span class="ic">🗒</span> Audit Log</a>
+      <a href="#/users" data-route="users" data-roles="ADMINISTRATOR"><span class="ic">👥</span> Users</a>
       <a href="#/settings" data-route="settings"><span class="ic">⚙</span> Settings</a>
     </nav>
     <div class="sidebar-foot">
@@ -57,6 +58,7 @@
             <span id="user-name">—</span>
             <span id="user-role" class="role-tag">—</span>
           </div>
+          <button class="btn sm" id="btn-password" title="เปลี่ยนรหัสผ่าน">🔑</button>
           <button class="btn sm" id="btn-logout" title="ออกจากระบบ">ออก</button>
         </div>
       </div>
@@ -85,7 +87,7 @@
     <div class="login-error" id="login-error"></div>
     <button class="btn gold" type="submit" id="login-submit">เข้าสู่ระบบ</button>
     <div class="login-hint">
-      บัญชีตัวอย่าง — <code>admin/admin123</code> · <code>operator/operator123</code> · <code>viewer/viewer123</code>
+      บัญชีเริ่มต้น — <code>admin/admin123</code> · <code>operator/operator123</code> · <code>viewer/viewer123</code><br>ระบบจะให้ตั้งรหัสผ่านใหม่ทันทีหลังเข้าครั้งแรก
     </div>
   </form>
 </div>

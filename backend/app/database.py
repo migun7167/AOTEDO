@@ -22,9 +22,21 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     last_login_at TEXT
 );
+
+-- Failed sign-ins, kept so repeated attempts can be throttled and reviewed.
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    ip_address TEXT,
+    success INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts
+ON login_attempts(username, created_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
@@ -324,6 +336,7 @@ def get_connection() -> sqlite3.Connection:
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("cargo_messages", "duplicate_type", "TEXT"),
     ("fsu_status", "status_time", "TEXT"),
+    ("users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"),
     ("matching_results", "override_status", "TEXT"),
     ("matching_results", "override_reason", "TEXT"),
     ("matching_results", "override_by", "TEXT"),
