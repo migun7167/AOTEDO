@@ -500,12 +500,24 @@ window.openDetail = async function (mawb) {
                 ${e.weight ? `· ${fmtW(e.weight)} ${esc(e.weight_unit || "")}` : ""}</div>
             </div></div>`).join("")}</div>` : ""}`,
     Houses: () => `
-      ${d.houses.length ? `<div class="tbl-wrap"><table class="tbl">
-        <thead><tr><th>HAWB</th><th>Link</th><th>Shipper</th><th>Consignee</th><th>Commodity</th>
+      ${d.houses.length ? `${canImport() && d.houses.length > 1 ? `
+        <div class="filter-bar" style="margin-bottom:12px">
+          <label class="cp-item"><input type="checkbox" id="hs-all"> เลือกทั้งหมด</label>
+          <span id="hs-count" style="color:var(--muted);font-size:.83rem"></span>
+          <div class="spacer"></div>
+          <button class="btn gold sm" id="hs-combine" disabled
+            onclick="openCombineDialog('${esc(mawb)}')">🧾 รวมเป็น DO ใบเดียว</button>
+        </div>` : ""}
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr>${canImport() && d.houses.length > 1 ? "<th></th>" : ""}
+          <th>HAWB</th><th>Link</th><th>Shipper</th><th>Consignee</th><th>Commodity</th>
           <th class="num">Pieces</th><th class="num">Weight</th><th>HS Code</th><th>Tax ID</th>
           <th></th></tr></thead>
         <tbody>${d.houses.map(h => `
-          <tr><td class="mono"><b>${esc(h.hawb_number)}</b></td>
+          <tr>${canImport() && d.houses.length > 1
+            ? `<td><input type="checkbox" class="hs-pick" value="${esc(h.id)}"
+                 onclick="event.stopPropagation();updateCombineButton()"></td>` : ""}
+            <td class="mono"><b>${esc(h.hawb_number)}</b></td>
             <td>${h.linked_by === "MANUAL"
               ? '<span class="badge warn">MANUAL</span>'
               : '<span class="badge muted">AUTO</span>'}</td>
@@ -571,7 +583,17 @@ window.openDetail = async function (mawb) {
             <td>${esc(h.performed_by || "—")}</td><td>${fmtD(h.performed_at)}</td></tr>`).join("")}
         </tbody></table></div>` : `<div class="empty">ไม่มีประวัติ</div>`,
   };
-  const show = (t) => { body.innerHTML = render[t](); };
+  const show = (t) => {
+    body.innerHTML = render[t]();
+    const all = $("#hs-all");
+    if (all) {
+      all.onclick = () => {
+        $$(".hs-pick").forEach(cb => { cb.checked = all.checked; });
+        updateCombineButton();
+      };
+      updateCombineButton();
+    }
+  };
   $$("#d-tabs button").forEach(b => b.onclick = () => {
     $$("#d-tabs button").forEach(x => x.classList.toggle("active", x === b));
     show(b.dataset.t);
@@ -670,6 +692,89 @@ window.openLinkPicker = async (mawb) => {
   };
   try { await load(); } catch (e) { toast(e.message, true); }
 };
+/* ---------------- combined delivery order ---------------- */
+window.updateCombineButton = () => {
+  const picked = $$(".hs-pick").filter(cb => cb.checked);
+  const btn = $("#hs-combine"), count = $("#hs-count");
+  if (btn) btn.disabled = picked.length < 2;
+  if (count) {
+    count.textContent = picked.length
+      ? `เลือกไว้ ${picked.length} house` + (picked.length < 2
+          ? " — ต้องเลือกอย่างน้อย 2 ใบจึงจะรวมได้" : "")
+      : "";
+  }
+};
+
+window.openCombineDialog = (mawb, preset = null) => {
+  // preset comes from the combinable worklist; otherwise use the ticked rows
+  const ids = preset ? preset.ids : $$(".hs-pick").filter(c => c.checked).map(c => c.value);
+  const label = preset ? preset.label : `${ids.length} house ของ ${mawb}`;
+  const back = mawb ? `openDetail('${esc(mawb)}')` : "closeModal();navigate()";
+
+  $("#modal-root").innerHTML = `
+    <div class="modal-back" onclick="if(event.target===this){${back}}">
+      <div class="modal" style="max-width:680px">
+        <div class="modal-head"><h2>รวมเป็น Delivery Order ใบเดียว</h2>
+          <button class="close" onclick="${back}">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:.88rem;margin-bottom:14px">
+            จะออก DO <b>1 ใบ</b> ที่ครอบคลุม <b>${esc(label)}</b>
+            — ผู้รับปลายทางมารับของทั้งหมดด้วยเอกสารใบเดียว</p>
+          <p style="color:var(--muted);font-size:.82rem;margin-bottom:16px">
+            ทุก house ต้องมีปลายทางเดียวกันและเป็นผู้รับรายเดียวกัน
+            วันหมดอายุจะนับจากเที่ยวบินที่ลงหลังสุด</p>
+          <div class="settings-grid">
+            <div class="setting-item"><div class="k">Landed on / ATA</div>
+              <input type="datetime-local" id="cb-landed">
+              <div class="hint">เว้นว่างไว้ = ใช้เวลาที่ลงหลังสุดจาก FSU</div></div>
+            <div class="setting-item"><div class="k">Aircraft Registration</div>
+              <input type="text" id="cb-acreg" placeholder="เว้นว่างได้"></div>
+            <div class="setting-item"><div class="k">Customer Code</div>
+              <input type="text" id="cb-cust" placeholder="เว้นว่างได้"></div>
+            <div class="setting-item"><div class="k">Issued By</div>
+              <input type="text" id="cb-issuer" placeholder="เช่น TG40441"></div>
+          </div>
+          <div class="setting-item" style="margin-top:14px">
+            <div class="k">เหตุผล / หมายเหตุ</div>
+            <input type="text" id="cb-reason" placeholder="บันทึกลง audit log">
+          </div>
+          ${isAdmin() ? `
+            <label class="cp-item" style="margin-top:14px">
+              <input type="checkbox" id="cb-force">
+              ยืนยันว่าเป็นผู้รับรายเดียวกัน แม้ชื่อจะสะกดต่างกัน</label>
+            <label class="cp-item" style="margin-top:8px">
+              <input type="checkbox" id="cb-supersede">
+              แทนที่ DO เดิมของ house เหล่านี้ (ใบเก่าจะกลายเป็น SUPERSEDED)</label>` : ""}
+          <div style="margin-top:18px;display:flex;gap:10px;align-items:center">
+            <button class="btn gold" id="cb-save">🧾 ออก DO รวม</button>
+            <button class="btn" onclick="${back}">ยกเลิก</button>
+          </div>
+          <div id="cb-status" style="color:var(--err);font-size:.85rem;margin-top:12px;white-space:pre-wrap"></div>
+        </div></div></div>`;
+
+  $("#cb-save").onclick = async () => {
+    $("#cb-status").style.color = "var(--muted)";
+    $("#cb-status").textContent = "กำลังออกเอกสาร…";
+    try {
+      const r = await api("/do/combine", jsonPost({
+        fhlIds: ids,
+        landedAt: $("#cb-landed").value,
+        aircraftRegistration: $("#cb-acreg").value.trim(),
+        customerCode: $("#cb-cust").value.trim(),
+        issuedBy: $("#cb-issuer").value.trim(),
+        reason: $("#cb-reason").value.trim(),
+        forceConsignee: $("#cb-force")?.checked || false,
+        supersede: $("#cb-supersede")?.checked || false,
+      }));
+      showDoResult(mawb, r);
+      toast(`ออก DO รวมเลขที่ ${r.doNumber} ครอบคลุม ${r.lines.length} house`);
+    } catch (e) {
+      $("#cb-status").style.color = "var(--err)";
+      $("#cb-status").textContent = e.message;
+    }
+  };
+};
+
 /* ---------------- delivery order ---------------- */
 window.openDoDialog = async (mawb, fhlId, hawb) => {
   // Prefill the ATA from the FSU arrival event when the message carried a time.
@@ -758,12 +863,17 @@ function showDoResult(mawb, r) {
           <button class="close" onclick="openDetail('${esc(mawb)}')">✕</button></div>
         <div class="modal-body">
           <div class="kv">
-            ${kv("HAWB", esc(r.hawbNumber))}
+            ${kv(r.doType === "COMBINED" ? `House (${r.lines.length} ใบ)` : "HAWB",
+                 r.doType === "COMBINED"
+                   ? r.lines.map(l => esc(l.hawbNumber)).join("<br>")
+                   : esc(r.hawbNumber))}
             ${kv("Station", esc(r.station))}
             ${kv("Consignee", esc(r.consignee?.name))}
             ${kv("Flight", esc(r.flightNumber) + (r.aircraftRegistration ? " / " + esc(r.aircraftRegistration) : ""))}
-            ${kv("Pieces", `${esc(r.pieces)} of ${esc(r.masterPieces)}`)}
-            ${kv("Weight", `${esc(r.weight)} of ${esc(r.masterWeight)}${esc(r.weightUnit)}`)}
+            ${r.doType === "COMBINED"
+              ? kv("รวมทั้งใบ", `${esc(r.totalPieces)} ชิ้น / ${esc(r.totalWeight)} ${esc(r.weightUnit || "")}`)
+              : kv("Pieces", `${esc(r.pieces)} of ${esc(r.masterPieces)}`)
+                + kv("Weight", `${esc(r.weight)} of ${esc(r.masterWeight)}${esc(r.weightUnit)}`)}
             ${kv("Landed / ATA", esc((r.landedAt || "—").replace("T", " ")))}
             ${kv("หมดอายุ (48 ชม.)", esc((r.expiryAt || "—").replace("T", " ")))}
           </div>
@@ -1036,12 +1146,19 @@ async function renderRawData(params) {
 
 /* ---------------- delivery orders page ---------------- */
 async function renderDeliveryOrders(params) {
-  const state = { search: params.get("search") || "", page: 1 };
+  const state = { search: params.get("search") || "", status: "", page: 1 };
   $("#view").innerHTML = `
+    <div class="panel" id="combinable-panel"></div>
     <div class="panel">
       <div class="filter-bar">
         <input type="search" id="do-search" placeholder="ค้นหา DO No / MAWB / HAWB…"
                value="${esc(state.search)}" style="width:280px">
+        <select id="do-status">
+          <option value="">ทุกสถานะ</option>
+          <option value="ACTIVE">ACTIVE</option>
+          <option value="SUPERSEDED">SUPERSEDED</option>
+          <option value="CANCELLED">CANCELLED</option>
+        </select>
         <button class="btn primary sm" id="do-apply">ค้นหา</button>
         <div class="spacer"></div>
         <span style="color:var(--muted);font-size:.83rem">
@@ -1050,32 +1167,72 @@ async function renderDeliveryOrders(params) {
       <div id="do-table"></div>
     </div>`;
 
+  // Consignees waiting on more than one shipment — the reason to combine.
+  (async () => {
+    let d;
+    try { d = await api("/do/combinable"); }
+    catch { $("#combinable-panel").remove(); return; }
+    if (!d.groups.length) { $("#combinable-panel").remove(); return; }
+    $("#combinable-panel").innerHTML = `
+      <h2>รวม DO ได้ (${d.groups.length} ราย)</h2>
+      <p style="color:var(--muted);font-size:.85rem;margin-bottom:14px">
+        ผู้รับเหล่านี้มีของมากกว่า 1 house ที่ยังไม่ได้ออก DO
+        รวมเป็นใบเดียวได้เพื่อให้มารับของครั้งเดียวจบ</p>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>ผู้รับปลายทาง</th><th>ปลายทาง</th><th class="num">House</th>
+          <th class="num">MAWB</th><th>HAWB</th><th class="num">Pieces</th>
+          <th class="num">Weight</th>${canImport() ? "<th></th>" : ""}</tr></thead>
+        <tbody>${d.groups.map((g, i) => `<tr>
+          <td class="trunc" title="${esc(g.consignee)}"><b>${esc(g.consignee)}</b></td>
+          <td>${esc(g.destination || "—")}</td>
+          <td class="num">${g.houseCount}</td>
+          <td class="num">${g.mawbCount}</td>
+          <td class="mono" style="font-size:.76rem">${
+            g.houses.map(h => esc(h.hawb_number)).join(", ")}</td>
+          <td class="num">${g.totalPieces}</td>
+          <td class="num">${fmtW(g.totalWeight)}</td>
+          ${canImport() ? `<td><button class="btn gold sm"
+            onclick="combineGroup(${i})">🧾 รวมเป็นใบเดียว</button></td>` : ""}
+        </tr>`).join("")}
+        </tbody></table></div>`;
+    window.__combinableGroups = d.groups;
+  })();
+
   async function load() {
     state.search = $("#do-search").value.trim();
+    state.status = $("#do-status").value;
     let d;
     try {
-      d = await api(`/do?${new URLSearchParams({ page: state.page, pageSize: 50, search: state.search })}`);
+      d = await api(`/do?${new URLSearchParams({
+        page: state.page, pageSize: 50, search: state.search, status: state.status })}`);
     } catch (e) { $("#do-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const statusBadge = (s) => s === "ACTIVE" ? '<span class="badge ok">ACTIVE</span>'
+      : s === "SUPERSEDED" ? '<span class="badge warn">SUPERSEDED</span>'
+      : '<span class="badge muted">CANCELLED</span>';
     $("#do-table").innerHTML = d.items.length ? `
       <div class="tbl-wrap"><table class="tbl">
-        <thead><tr><th>DO No</th><th>MAWB</th><th>HAWB</th><th>Consignee</th>
-          <th>Station</th><th>Flight</th><th class="num">Pcs</th><th class="num">Weight</th>
-          <th>หมดอายุ</th><th>ออกโดย</th><th>พิมพ์ซ้ำ</th><th></th></tr></thead>
+        <thead><tr><th>DO No</th><th>ชนิด</th><th>สถานะ</th><th>MAWB</th><th>HAWB</th>
+          <th>Consignee</th><th>Station</th><th class="num">Pcs</th><th class="num">Weight</th>
+          <th>หมดอายุ</th><th>ออกโดย</th><th></th></tr></thead>
         <tbody>${d.items.map(r => `<tr>
           <td class="mono"><b>${esc(r.do_number)}</b></td>
+          <td>${r.do_type === "COMBINED"
+            ? `<span class="badge info">รวม ${r.line_count}</span>`
+            : '<span class="badge muted">เดี่ยว</span>'}</td>
+          <td>${statusBadge(r.status)}</td>
           <td class="mono clickable" onclick="openDetail('${esc(r.mawb_number)}')">${esc(r.mawb_number)}</td>
-          <td class="mono">${esc(r.hawb_number)}</td>
+          <td class="mono trunc" title="${esc(r.hawbs || "")}">${esc(r.hawbs || r.hawb_number || "—")}</td>
           <td class="trunc" title="${esc(r.consignee_name)}">${esc(r.consignee_name || "—")}</td>
           <td>${esc(r.station || "—")}</td>
-          <td>${esc(r.flight_number || "—")}</td>
           <td class="num">${r.pieces ?? "—"}</td>
           <td class="num">${fmtW(r.weight)}</td>
           <td>${esc((r.expiry_at || "—").replace("T", " "))}</td>
           <td>${esc(r.issued_by || r.created_by || "—")}</td>
-          <td class="num">${r.reprint_count || "—"}</td>
           <td style="white-space:nowrap">
             <button class="btn sm" onclick="window.open('${API}/do/${esc(r.id)}/preview','_blank')">พิมพ์</button>
             <button class="btn sm" onclick="window.open('${API}/do/${esc(r.id)}/pdf','_blank')">PDF</button>
+            ${isAdmin() && r.status === "ACTIVE"
+              ? `<button class="btn sm" onclick="cancelDo('${esc(r.id)}','${esc(r.do_number)}')">ยกเลิก</button>` : ""}
           </td></tr>`).join("")}
         </tbody></table></div>
       <div class="pager"><span>${d.total} ฉบับ</span>
@@ -1093,6 +1250,26 @@ async function renderDeliveryOrders(params) {
   $("#do-search").onkeydown = (e) => { if (e.key === "Enter") { state.page = 1; load(); } };
   load();
 }
+
+window.combineGroup = (index) => {
+  const group = (window.__combinableGroups || [])[index];
+  if (!group) return;
+  openCombineDialog(null, {
+    ids: group.houses.map(h => h.id),
+    label: `${group.houseCount} house ของ ${group.consignee}`,
+  });
+};
+
+window.cancelDo = async (doId, doNumber) => {
+  const reason = prompt(`เหตุผลที่ยกเลิก DO ${doNumber}\n` +
+                        "(house ในใบนี้จะกลับมาออก DO ใหม่ได้):");
+  if (reason === null) return;
+  try {
+    await api(`/do/${doId}/cancel`, jsonPost({ reason }));
+    toast(`ยกเลิก DO ${doNumber} แล้ว`);
+    navigate();
+  } catch (e) { toast(e.message, true); }
+};
 
 /* ---------------- errors page ---------------- */
 async function renderErrors() {

@@ -30,7 +30,7 @@ cd backend && python3 -m uvicorn main:app --port 8000
 รัน test:
 
 ```bash
-cd backend && python3 -m pytest tests/ -q      # 117 tests
+cd backend && python3 -m pytest tests/ -q      # 145 tests
 ```
 
 ### บัญชีเริ่มต้น
@@ -65,7 +65,8 @@ cd backend && python3 -m pytest tests/ -q      # 117 tests
 | Manual link / unlink FHL | ✓ | | |
 | Resolve / Reject (override สถานะ) | ✓ | | |
 | ตั้งค่า Matching Rule | ✓ | | |
-| ออก Delivery Order | ✓ | ✓ | |
+| ออก Delivery Order (เดี่ยว / รวม) | ✓ | ✓ | |
+| ข้ามกฎผู้รับ / แทนที่ / ยกเลิก DO | ✓ | | |
 | แก้ไข DO ที่ออกไปแล้ว | ✓ | | |
 | พิมพ์ DO ที่ออกแล้ว | ✓ | ✓ | ✓ |
 | ดู Audit Log | ✓ | | |
@@ -89,6 +90,7 @@ PBKDF2-HMAC-SHA256 120,000 รอบ พร้อม salt ต่อผู้ใ�
 | 217-08722687 | `WAITING_FOR_FHL` (50) | มี FWB ยังไม่มี FHL |
 | 217-08722688 | `WAITING_FOR_FWB` (0) | มี FHL ยังไม่มี FWB |
 | 217-08722689 | `MATCHED_WITH_TOLERANCE` (95) | น้ำหนักต่าง 0.2 KG อยู่ใน tolerance |
+| 217-08722690 | `MATCHED` (100) | 2 house ของผู้รับรายเดียวกัน — ใช้ลองรวมเป็น DO ใบเดียว |
 | — | `INVALID_FORMAT` | ไฟล์ที่ไม่ใช่ Cargo-IMP |
 
 ---
@@ -117,7 +119,7 @@ airline prefix, flight, FWB version, มี/ไม่มี duplicate, ช่ว
 - **Parsed** — JSON ที่ parse ได้
 - **History** — ทุกการเปลี่ยนสถานะ
 
-**Raw Data / Analysis** — ดูตารางดิบทั้ง 14 ตารางจาก database
+**Raw Data / Analysis** — ดูตารางดิบทั้ง 16 ตารางจาก database
 - ต่อเงื่อนไขได้ไม่จำกัด รวมแบบ **AND หรือ OR**
 - operator: `= ≠ contains starts-with > ≥ < ≤ is-empty not-empty`
 - ช่องกรอกค่ามี dropdown แนะนำค่าที่มีจริงในคอลัมน์นั้น (พร้อมจำนวนแถว)
@@ -169,7 +171,7 @@ backend/
       settings_service.py    matching rule ที่ปรับได้จากหน้าจอ
       export_service.py      Excel / CSV / JSON / raw zip
       do_service.py          Delivery Order — mapping, Code 39, HTML และ PDF
-  tests/                     117 tests (parser, matching, API, RBAC, DO, users)
+  tests/                     145 tests (parser, matching, API, RBAC, DO, combine, users)
 frontend/                    index.html + css/ + js/app.js + fonts/ (self-hosted)
 scripts/seed.py              โหลดข้อมูลตัวอย่าง
 scripts/fetch_fonts.py       ดาวน์โหลด web font มาเก็บในโปรเจกต์
@@ -251,6 +253,40 @@ DO เป็นเอกสารระดับ house — หนึ่งใบ
 ผลลัพธ์เลือกได้สองแบบ: **หน้าพิมพ์ HTML** (สั่ง Print → Save as PDF จากเบราว์เซอร์
 ได้ทุกเครื่อง) หรือ **ดาวน์โหลด PDF** ขนาด A4 ที่ระบบสร้างเอง
 
+### รวมหลาย House ไว้ใน DO ใบเดียว (Combine)
+
+ผู้รับรายเดียวกันที่มีของหลาย house ไม่ต้องถือ DO หลายใบมารับของ — รวมเป็นใบเดียวได้
+โดยตารางบนเอกสารจะมีหนึ่งบรรทัดต่อหนึ่ง HAWB พร้อมแถวรวมท้ายตาราง
+
+ทำได้สองทาง:
+- **แท็บ Houses** ของ MAWB — ติ๊กเลือก house ที่ต้องการแล้วกด "รวมเป็น DO ใบเดียว"
+- **หน้า Delivery Orders** — ระบบไล่หาผู้รับที่มีของมากกว่า 1 house และยังไม่ได้ออก DO
+  มาแสดงเป็นรายการให้กดรวมได้ทันที (รวมข้าม MAWB และข้ามเที่ยวบินได้)
+
+กฎที่ระบบบังคับ:
+
+| กฎ | ข้ามได้ไหม |
+|---|---|
+| ต้องเลือกอย่างน้อย 2 house | ไม่ได้ |
+| ปลายทางต้องเป็นสถานีเดียวกัน | ไม่ได้ — ส่งของไปสองที่ด้วยใบเดียวไม่ได้ |
+| ผู้รับปลายทางต้องเป็นรายเดียวกัน | Administrator ข้ามได้พร้อมระบุเหตุผล |
+| house ต้องยังไม่มี DO ที่ใช้งานอยู่ | Administrator เลือก "แทนที่ DO เดิม" ได้ |
+
+การเทียบชื่อผู้รับตัดคำต่อท้ายอย่าง CO / LTD / COMPANY / LIMITED / (THAILAND) และ
+เครื่องหมายวรรคตอนออกก่อน ทำให้ `SEIKO PRECISION THAILAND CO LTD` กับ
+`SEIKO PRECISION (THAILAND) COMPANY LIMITED` ถือเป็นรายเดียวกันโดยไม่ต้องข้ามกฎ
+
+**สิ่งที่ต่างจาก DO เดี่ยว:**
+- บาร์โค้ดเป็น **เลข DO** แทน HAWB เพราะเอกสารครอบหลาย house
+- วันหมดอายุ 48 ชั่วโมงนับจาก **เที่ยวบินที่ลงหลังสุด** ไม่งั้นบรรทัดที่มาก่อนจะหมดอายุ
+  ก่อนที่ผู้รับจะมารับได้
+- มีแถว TOTAL รวมจำนวนชิ้นและน้ำหนักท้ายตาราง
+
+**การกันของออกซ้ำ:** 1 house อยู่บน DO ที่ ACTIVE ได้ใบเดียวเท่านั้น ถ้า house
+อยู่บน DO รวมแล้ว จะออกใบเดี่ยวซ้ำไม่ได้ ใบที่ถูกแทนที่จะเปลี่ยนสถานะเป็น
+`SUPERSEDED` ส่วน Administrator ยกเลิก (`CANCELLED`) ใบไหนก็ได้เพื่อปลด house
+ให้กลับมาออกใหม่ได้
+
 ช่อง SHC บนเอกสารต้นแบบเว้นว่าง ระบบจึงเว้นว่างเป็นค่าเริ่มต้น (`do_shc_source = HOUSE`)
 ถ้าต้องการให้พิมพ์ SPH ของใบแม่ (เช่น HEA SPX) เปลี่ยนเป็น `MASTER` ในหน้า Settings
 
@@ -287,6 +323,9 @@ DO เป็นเอกสารระดับ house — หนึ่งใบ
 | GET | `/api/v1/houses/unassigned` | house ที่เลือก link ได้ | ทุกบทบาท |
 | GET | `/api/v1/dashboard/summary` | ตัวเลขทั้งหมดของ dashboard | ทุกบทบาท |
 | POST | `/api/v1/matches/{mawb}/houses/{id}/do` | ออก / พิมพ์ซ้ำ / แก้ไข DO | admin, operator (แก้ไข = admin) |
+| GET | `/api/v1/do/combinable` | ผู้รับที่มีของหลาย house และยังไม่มี DO | ทุกบทบาท |
+| POST | `/api/v1/do/combine` | ออก DO รวมหลาย house | admin, operator (ข้ามกฎ = admin) |
+| POST | `/api/v1/do/{id}/cancel` | ยกเลิก DO เพื่อปลด house | admin |
 | GET | `/api/v1/do` | รายการ DO ที่ออกแล้ว | ทุกบทบาท |
 | GET | `/api/v1/do/{id}/preview` \| `/pdf` | หน้าพิมพ์ HTML / ไฟล์ PDF | ทุกบทบาท |
 | GET | `/api/v1/errors` \| `/history` | หน้า Errors / History | ทุกบทบาท |

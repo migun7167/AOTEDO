@@ -1,8 +1,10 @@
 """SQLite database layer for Paperless AOT."""
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import uuid
 from contextlib import contextmanager
 
 DEFAULT_DB_PATH = os.path.join(
@@ -302,9 +304,40 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
     created_by TEXT,
     created_at TEXT NOT NULL,
     reprint_count INTEGER NOT NULL DEFAULT 0,
+    do_type TEXT NOT NULL DEFAULT 'SINGLE',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    superseded_by TEXT,
+    -- A combined DO leaves hawb_number NULL, and SQLite treats NULLs as
+    -- distinct, so this still stops two live single DOs for one house.
     UNIQUE (mawb_number, hawb_number)
 );
 CREATE INDEX IF NOT EXISTS idx_do_mawb ON delivery_orders(mawb_number);
+
+-- One row per house waybill printed on a DO. A single DO has one; a combined
+-- DO has many, which is what lets one consignee collect several shipments
+-- against one release document.
+CREATE TABLE IF NOT EXISTS delivery_order_lines (
+    id TEXT PRIMARY KEY,
+    do_id TEXT NOT NULL REFERENCES delivery_orders(id),
+    line_no INTEGER NOT NULL,
+    fhl_id TEXT REFERENCES fhl_house(id),
+    mawb_number TEXT,
+    hawb_number TEXT,
+    shc TEXT,
+    pieces INTEGER,
+    master_pieces INTEGER,
+    weight REAL,
+    master_weight REAL,
+    weight_unit TEXT,
+    board_point TEXT,
+    off_point TEXT,
+    flight_number TEXT,
+    aircraft_registration TEXT,
+    landed_at TEXT,
+    nature_of_goods TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_do_lines_do ON delivery_order_lines(do_id);
+CREATE INDEX IF NOT EXISTS idx_do_lines_fhl ON delivery_order_lines(fhl_id);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
@@ -341,6 +374,9 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("matching_results", "override_reason", "TEXT"),
     ("matching_results", "override_by", "TEXT"),
     ("matching_results", "override_at", "TEXT"),
+    ("delivery_orders", "do_type", "TEXT NOT NULL DEFAULT 'SINGLE'"),
+    ("delivery_orders", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+    ("delivery_orders", "superseded_by", "TEXT"),
 ]
 
 
@@ -353,9 +389,39 @@ def init_db() -> None:
                         conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        _backfill_do_lines(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _backfill_do_lines(conn: sqlite3.Connection) -> None:
+    """Give every pre-existing single DO the line row the new model expects."""
+    orphans = conn.execute(
+        """SELECT d.* FROM delivery_orders d
+           WHERE NOT EXISTS (SELECT 1 FROM delivery_order_lines l
+                             WHERE l.do_id = d.id)""").fetchall()
+    for row in orphans:
+        payload = {}
+        if row["payload"]:
+            try:
+                payload = json.loads(row["payload"])
+            except ValueError:
+                payload = {}
+        conn.execute(
+            """INSERT INTO delivery_order_lines
+               (id, do_id, line_no, fhl_id, mawb_number, hawb_number, shc,
+                pieces, master_pieces, weight, master_weight, weight_unit,
+                board_point, off_point, flight_number, aircraft_registration,
+                landed_at, nature_of_goods)
+               VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), row["id"], row["fhl_id"], row["mawb_number"],
+             row["hawb_number"], payload.get("shc"), row["pieces"],
+             payload.get("masterPieces"), row["weight"],
+             payload.get("masterWeight"), payload.get("weightUnit"),
+             payload.get("boardPoint"), payload.get("offPoint"),
+             row["flight_number"], row["aircraft_registration"],
+             row["landed_at"], payload.get("natureOfGoods")))
 
 
 @contextmanager

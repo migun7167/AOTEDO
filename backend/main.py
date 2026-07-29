@@ -598,25 +598,103 @@ def create_delivery_order(mawb: str, fhl_id: str, body: DOBody, request: Request
     return do
 
 
+class CombineBody(DOBody):
+    fhlIds: list[str] = []
+    reason: str = ""
+    forceConsignee: bool = False    # different consignee names, same importer
+    supersede: bool = False         # replace the singles already issued
+
+
+@app.get("/api/v1/do/combinable")
+def combinable(user: dict = Depends(any_user)):
+    """House waybills with no live DO, grouped by consignee and destination."""
+    with db() as conn:
+        return {"groups": do_service.combinable_groups(conn)}
+
+
+@app.post("/api/v1/do/combine")
+def combine_delivery_order(body: CombineBody, request: Request,
+                           user: dict = Depends(can_import)):
+    """Issue one DO covering several house waybills."""
+    payload = body.model_dump()
+    fhl_ids = payload.pop("fhlIds", [])
+    force = bool(payload.pop("forceConsignee", False))
+    supersede = bool(payload.pop("supersede", False))
+    payload.pop("amend", None)
+    if (force or supersede) and user["role"] != ADMIN:
+        raise HTTPException(403, {
+            "code": "FORBIDDEN",
+            "message": "การข้ามการตรวจผู้รับหรือแทนที่ DO เดิม ทำได้เฉพาะ Administrator"})
+    overrides = {k: v for k, v in payload.items() if v}
+
+    with db() as conn:
+        settings = settings_service.get_all(conn)
+        try:
+            do = do_service.combine(
+                conn, fhl_ids, user["username"], overrides,
+                number_start=settings["do_number_start"],
+                default_issued_by=settings["do_issued_by"],
+                shc_source=settings["do_shc_source"],
+                force_consignee=force, supersede=supersede)
+        except do_service.DOError as e:
+            raise HTTPException(400, {"code": "DO_NOT_COMBINABLE",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "COMBINE_DELIVERY_ORDER", user["username"],
+                  "delivery_orders", do["doNumber"],
+                  after={"houses": [x["hawbNumber"] for x in do["lines"]],
+                         "supersedes": do.get("supersedes"),
+                         "forcedConsignee": force},
+                  reason=body.reason, ip=ip, user_agent=ua)
+    return do
+
+
+@app.post("/api/v1/do/{do_id}/cancel")
+def cancel_delivery_order(do_id: str, body: LinkBody, request: Request,
+                          user: dict = Depends(admin_only)):
+    """Void a DO so its houses become available for a different document."""
+    with db() as conn:
+        try:
+            result = do_service.cancel(conn, do_id)
+        except do_service.DOError as e:
+            raise HTTPException(400, {"code": "DO_NOT_CANCELLABLE",
+                                      "message": str(e)})
+        ip, ua = client_info(request)
+        svc.audit(conn, "CANCEL_DELIVERY_ORDER", user["username"],
+                  "delivery_orders", result["doNumber"], reason=body.reason,
+                  ip=ip, user_agent=ua)
+    return result
+
+
 @app.get("/api/v1/do")
 def list_delivery_orders(page: int = 1, pageSize: int = 50, search: str = "",
-                         user: dict = Depends(any_user)):
+                         status: str = "", user: dict = Depends(any_user)):
     where, params = [], []
     if search:
-        where.append("(mawb_number LIKE ? OR hawb_number LIKE ? OR do_number LIKE ?)")
-        params += [f"%{search}%"] * 3
+        where.append(
+            """(d.mawb_number LIKE ? OR d.hawb_number LIKE ? OR d.do_number LIKE ?
+                OR EXISTS (SELECT 1 FROM delivery_order_lines l
+                           WHERE l.do_id = d.id AND l.hawb_number LIKE ?))""")
+        params += [f"%{search}%"] * 4
+    if status:
+        where.append("d.status = ?")
+        params.append(status.upper())
     wsql = ("WHERE " + " AND ".join(where)) if where else ""
     pageSize = min(max(pageSize, 1), 200)
     with db() as conn:
         total = conn.execute(
-            f"SELECT COUNT(*) FROM delivery_orders {wsql}", params).fetchone()[0]
+            f"SELECT COUNT(*) FROM delivery_orders d {wsql}", params).fetchone()[0]
         rows = conn.execute(
-            f"""SELECT id, do_number, mawb_number, hawb_number, station, do_date,
-                       consignee_name, flight_number, landed_at, expiry_at,
-                       issued_by, pieces, weight, created_by, created_at,
-                       reprint_count
-                FROM delivery_orders {wsql}
-                ORDER BY created_at DESC LIMIT ? OFFSET ?""",
+            f"""SELECT d.id, d.do_number, d.mawb_number, d.hawb_number, d.station,
+                       d.do_date, d.consignee_name, d.flight_number, d.landed_at,
+                       d.expiry_at, d.issued_by, d.pieces, d.weight, d.created_by,
+                       d.created_at, d.reprint_count, d.do_type, d.status,
+                       (SELECT COUNT(*) FROM delivery_order_lines l
+                        WHERE l.do_id = d.id) AS line_count,
+                       (SELECT GROUP_CONCAT(l.hawb_number, ', ')
+                        FROM delivery_order_lines l WHERE l.do_id = d.id) AS hawbs
+                FROM delivery_orders d {wsql}
+                ORDER BY d.created_at DESC LIMIT ? OFFSET ?""",
             params + [pageSize, (page - 1) * pageSize]).fetchall()
     return {"page": page, "pageSize": pageSize, "total": total,
             "items": [dict(r) for r in rows]}
@@ -836,11 +914,18 @@ EXPLORER_TABLES: dict[str, list[str]] = {
     "fsu_status": ["id", "mawb_number", "status_code", "airport", "flight_number",
                    "status_date", "status_time", "weight", "weight_unit",
                    "hawb_number", "raw_line", "created_at"],
-    "delivery_orders": ["id", "do_number", "mawb_number", "hawb_number", "station",
-                        "do_date", "customer_code", "consignee_name",
-                        "flight_number", "aircraft_registration", "landed_at",
-                        "expiry_at", "issued_by", "pieces", "weight",
-                        "created_by", "created_at", "reprint_count"],
+    "delivery_orders": ["id", "do_number", "do_type", "status", "mawb_number",
+                        "hawb_number", "station", "do_date", "customer_code",
+                        "consignee_name", "flight_number",
+                        "aircraft_registration", "landed_at", "expiry_at",
+                        "issued_by", "pieces", "weight", "created_by",
+                        "created_at", "reprint_count", "superseded_by"],
+    "delivery_order_lines": ["id", "do_id", "line_no", "fhl_id", "mawb_number",
+                             "hawb_number", "shc", "pieces", "master_pieces",
+                             "weight", "master_weight", "weight_unit",
+                             "board_point", "off_point", "flight_number",
+                             "aircraft_registration", "landed_at",
+                             "nature_of_goods"],
     "matching_results": ["id", "mawb_number", "match_status", "override_status",
                          "match_score", "fhl_count", "fwb_pieces",
                          "fhl_total_pieces", "pieces_difference", "fwb_weight",

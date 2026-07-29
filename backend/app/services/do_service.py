@@ -216,22 +216,11 @@ def build_context(conn: sqlite3.Connection, mawb: str, fhl_id: str,
         except (ValueError, TypeError):
             sph = []
 
-    return {
+    line = {
         "mawbNumber": mawb,
         "mawbPlain": mawb.replace("-", ""),
         "hawbNumber": house["hawb_number"],
         "fhlId": house["id"],
-        "station": overrides.get("station") or AIRPORT_CITY.get(
-            destination or "", destination or ""),
-        "doDate": do_date,
-        "customerCode": overrides.get("customerCode", ""),
-        "consignee": {
-            "name": house["consignee_name"] or "",
-            "address": house["consignee_address"] or "",
-            "postalCode": house["consignee_postal_code"] or "",
-            "country": COUNTRY_NAME.get(house["consignee_country"] or "",
-                                        house["consignee_country"] or ""),
-        },
         "shc": " ".join(sph),
         "pieces": house["pieces"],
         "masterPieces": (result["fwb_pieces"] if result else None) or (
@@ -246,14 +235,151 @@ def build_context(conn: sqlite3.Connection, mawb: str, fhl_id: str,
                                    fwb["flight_number"] if fwb else None),
         "aircraftRegistration": overrides.get("aircraftRegistration", ""),
         "landedAt": landed,
-        "expiryAt": expiry,
         "natureOfGoods": house["commodity"] or (
             fwb["nature_of_goods"] if fwb else "") or "",
+    }
+
+    # The header repeats the single line's values so existing callers, stored
+    # payloads and the PDF layout all keep working unchanged.
+    return {
+        **line,
+        "doType": "SINGLE",
+        "lines": [line],
+        "station": overrides.get("station") or AIRPORT_CITY.get(
+            destination or "", destination or ""),
+        "doDate": do_date,
+        "customerCode": overrides.get("customerCode", ""),
+        "consignee": {
+            "name": house["consignee_name"] or "",
+            "address": house["consignee_address"] or "",
+            "postalCode": house["consignee_postal_code"] or "",
+            "country": COUNTRY_NAME.get(house["consignee_country"] or "",
+                                        house["consignee_country"] or ""),
+        },
+        "expiryAt": expiry,
         "issuedBy": overrides.get("issuedBy", ""),
         "carrierCode": carrier_code,
         "carrierName": carrier_name,
         "terminalName": terminal,
     }
+
+
+# --------------------------------------------------------------- combining ---
+
+def normalise_party(name: str | None) -> str:
+    """Fold a consignee name for comparison: case, punctuation and the company
+    suffixes that the same importer is spelled with on different house bills."""
+    # Periods vanish rather than becoming spaces, so "K.K." folds to "KK"
+    # instead of splitting into two tokens.
+    text = re.sub(r"[^A-Z0-9 ]", " ", (name or "").upper().replace(".", ""))
+    text = re.sub(
+        r"\b(CO|COMPANY|LTD|LIMITED|PUBLIC|PCL|INC|CORP|CORPORATION|"
+        r"THAILAND|GROUP|INTERNATIONAL)\b", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def active_do_for_house(conn: sqlite3.Connection, fhl_id: str):
+    """The live DO a house is already released on, if any."""
+    return conn.execute(
+        """SELECT d.id, d.do_number, d.do_type FROM delivery_order_lines l
+           JOIN delivery_orders d ON d.id = l.do_id
+           WHERE l.fhl_id = ? AND d.status = 'ACTIVE'
+           LIMIT 1""", (fhl_id,)).fetchone()
+
+
+def check_combinable(conn: sqlite3.Connection, fhl_ids: list[str],
+                     force_consignee: bool = False,
+                     supersede: bool = False) -> dict:
+    """Validate a combine request and report exactly what blocks it."""
+    if len(fhl_ids) < 2:
+        raise DOError("ต้องเลือก house อย่างน้อย 2 ใบจึงจะรวมเป็น DO เดียวได้")
+    if len(set(fhl_ids)) != len(fhl_ids):
+        raise DOError("มี house ซ้ำกันในรายการที่เลือก")
+
+    houses = []
+    for fhl_id in fhl_ids:
+        row = conn.execute("SELECT * FROM fhl_house WHERE id = ?",
+                           (fhl_id,)).fetchone()
+        if not row:
+            raise DOError(f"ไม่พบ house {fhl_id}")
+        houses.append(row)
+
+    # One delivery address per order — this one cannot be waived.
+    stations = {h["destination"] for h in houses}
+    if len(stations) > 1:
+        raise DOError(
+            "รวมไม่ได้เพราะปลายทางไม่ตรงกัน: " + ", ".join(sorted(
+                s or "?" for s in stations)))
+
+    consignees = {normalise_party(h["consignee_name"]) for h in houses}
+    consignee_mismatch = len(consignees) > 1
+    if consignee_mismatch and not force_consignee:
+        raise DOError(
+            "รวมไม่ได้เพราะผู้รับปลายทางไม่ตรงกัน: "
+            + " | ".join(sorted({h["consignee_name"] or "(ไม่ระบุ)"
+                                 for h in houses}))
+            + " — ถ้ายืนยันว่าเป็นผู้รับรายเดียวกัน ให้ติ๊กยืนยันแล้วระบุเหตุผล")
+
+    blocked, superseding = [], []
+    for house in houses:
+        existing = active_do_for_house(conn, house["id"])
+        if not existing:
+            continue
+        if supersede:
+            superseding.append(existing["id"])
+        else:
+            blocked.append(f"{house['hawb_number']} (DO {existing['do_number']})")
+    if blocked:
+        raise DOError(
+            "house เหล่านี้มี DO ที่ยังใช้งานอยู่แล้ว: " + ", ".join(blocked)
+            + " — ถ้าต้องการให้ใบใหม่แทนที่ใบเดิม ให้ติ๊กแทนที่ DO เดิม")
+
+    return {"houses": houses, "consigneeMismatch": consignee_mismatch,
+            "supersede": sorted(set(superseding))}
+
+
+def build_combined_context(conn: sqlite3.Connection, fhl_ids: list[str],
+                           overrides: dict | None = None,
+                           shc_source: str = "HOUSE",
+                           force_consignee: bool = False,
+                           supersede: bool = False) -> dict:
+    """Header from what the houses share, one table line per house."""
+    overrides = overrides or {}
+    check = check_combinable(conn, fhl_ids, force_consignee, supersede)
+    houses = check["houses"]
+
+    lines, header = [], None
+    for house in houses:
+        ctx = build_context(conn, house["mawb_number"], house["id"],
+                            overrides, shc_source)
+        header = header or ctx
+        lines.append(ctx["lines"][0])
+
+    landed = max((_as_dt(x["landedAt"]) for x in lines
+                  if x.get("landedAt")), default=None)
+    if overrides.get("landedAt"):
+        landed = _parse_iso(overrides["landedAt"]) or landed
+
+    return {
+        **header,
+        "doType": "COMBINED",
+        "lines": lines,
+        "hawbNumber": None,
+        "fhlId": None,
+        # The expiry clock starts from the last shipment to land, so no line on
+        # the document expires before the consignee could collect it.
+        "landedAt": landed,
+        "expiryAt": landed + timedelta(hours=EXPIRY_HOURS) if landed else None,
+        "totalPieces": sum(x["pieces"] or 0 for x in lines),
+        "totalWeight": round(sum(float(x["weight"] or 0) for x in lines), 3),
+        "consigneeMismatch": check["consigneeMismatch"],
+        "supersedes": check["supersede"],
+        "combineReason": overrides.get("reason", ""),
+    }
+
+
+def _as_dt(value) -> datetime | None:
+    return value if isinstance(value, datetime) else _parse_iso(value)
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -281,8 +407,17 @@ def issue(conn: sqlite3.Connection, mawb: str, fhl_id: str, user: str,
 
     existing = conn.execute(
         """SELECT * FROM delivery_orders
-           WHERE mawb_number = ? AND hawb_number = ?""",
+           WHERE mawb_number = ? AND hawb_number = ? AND status = 'ACTIVE'""",
         (mawb, ctx["hawbNumber"])).fetchone()
+
+    if not existing:
+        # A combined DO already covering this house releases it; issuing a
+        # second single DO would let the same cargo out twice.
+        on_combined = active_do_for_house(conn, fhl_id)
+        if on_combined:
+            raise DOError(
+                f"house นี้อยู่บน DO รวมเลขที่ {on_combined['do_number']} แล้ว "
+                "ถ้าต้องการออกใบเดี่ยว ให้ยกเลิก DO รวมใบนั้นก่อน")
 
     if existing and amend:
         ctx["doNumber"] = existing["do_number"]
@@ -302,6 +437,7 @@ def issue(conn: sqlite3.Connection, mawb: str, fhl_id: str, user: str,
              ctx["expiryAt"].isoformat(timespec="minutes") if ctx["expiryAt"] else None,
              ctx["issuedBy"], ctx["pieces"], ctx["weight"],
              json.dumps(ctx, default=_json_default), existing["id"]))
+        _replace_lines(conn, existing["id"], ctx)
         return json.loads(json.dumps(ctx, default=_json_default))
 
     if existing:
@@ -337,7 +473,126 @@ def issue(conn: sqlite3.Connection, mawb: str, fhl_id: str, user: str,
          ctx["issuedBy"], ctx["pieces"], ctx["weight"],
          json.dumps(ctx, default=_json_default), user,
          datetime.now().isoformat(timespec="seconds")))
+    _replace_lines(conn, do_id, ctx)
     return json.loads(json.dumps(ctx, default=_json_default))
+
+
+def _replace_lines(conn: sqlite3.Connection, do_id: str, ctx: dict) -> None:
+    conn.execute("DELETE FROM delivery_order_lines WHERE do_id = ?", (do_id,))
+    for index, line in enumerate(ctx.get("lines") or [], start=1):
+        landed = _as_dt(line.get("landedAt"))
+        conn.execute(
+            """INSERT INTO delivery_order_lines
+               (id, do_id, line_no, fhl_id, mawb_number, hawb_number, shc,
+                pieces, master_pieces, weight, master_weight, weight_unit,
+                board_point, off_point, flight_number, aircraft_registration,
+                landed_at, nature_of_goods)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), do_id, index, line.get("fhlId"),
+             line.get("mawbNumber"), line.get("hawbNumber"), line.get("shc"),
+             line.get("pieces"), line.get("masterPieces"), line.get("weight"),
+             line.get("masterWeight"), line.get("weightUnit"),
+             line.get("boardPoint"), line.get("offPoint"),
+             line.get("flightNumber"), line.get("aircraftRegistration"),
+             landed.isoformat(timespec="minutes") if landed else None,
+             line.get("natureOfGoods")))
+
+
+def combine(conn: sqlite3.Connection, fhl_ids: list[str], user: str,
+            overrides: dict | None = None, number_start: int = 5000001,
+            default_issued_by: str = "", shc_source: str = "HOUSE",
+            force_consignee: bool = False, supersede: bool = False) -> dict:
+    """Issue one DO covering several house waybills."""
+    ctx = build_combined_context(conn, fhl_ids, overrides, shc_source,
+                                 force_consignee, supersede)
+    ctx["issuedBy"] = ctx["issuedBy"] or default_issued_by
+
+    do_number = _next_do_number(conn, number_start)
+    do_id = str(uuid.uuid4())
+    ctx["doNumber"] = do_number
+    ctx["id"] = do_id
+    ctx["reprint"] = False
+    ctx["reprintCount"] = 0
+
+    conn.execute(
+        """INSERT INTO delivery_orders
+           (id, do_number, mawb_number, hawb_number, fhl_id, station, do_date,
+            customer_code, consignee_name, flight_number, aircraft_registration,
+            landed_at, expiry_at, issued_by, pieces, weight, payload,
+            created_by, created_at, reprint_count, do_type, status)
+           VALUES (?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'COMBINED','ACTIVE')""",
+        (do_id, do_number, ctx["mawbNumber"], ctx["station"],
+         ctx["doDate"].isoformat(timespec="seconds"), ctx["customerCode"],
+         ctx["consignee"]["name"], ctx["flightNumber"],
+         ctx["aircraftRegistration"],
+         ctx["landedAt"].isoformat(timespec="minutes") if ctx["landedAt"] else None,
+         ctx["expiryAt"].isoformat(timespec="minutes") if ctx["expiryAt"] else None,
+         ctx["issuedBy"], ctx["totalPieces"], ctx["totalWeight"],
+         json.dumps(ctx, default=_json_default), user,
+         datetime.now().isoformat(timespec="seconds")))
+    _replace_lines(conn, do_id, ctx)
+
+    for old_id in ctx.get("supersedes") or []:
+        conn.execute(
+            """UPDATE delivery_orders SET status = 'SUPERSEDED', superseded_by = ?
+               WHERE id = ?""", (do_id, old_id))
+
+    return json.loads(json.dumps(ctx, default=_json_default))
+
+
+def cancel(conn: sqlite3.Connection, do_id: str) -> dict:
+    """Void a DO so its houses can be released on a different document."""
+    row = conn.execute(
+        "SELECT * FROM delivery_orders WHERE id = ? OR do_number = ?",
+        (do_id, do_id)).fetchone()
+    if not row:
+        raise DOError(f"ไม่พบ Delivery Order {do_id}")
+    if row["status"] != "ACTIVE":
+        raise DOError(f"DO {row['do_number']} ถูกยกเลิกหรือถูกแทนที่ไปแล้ว")
+    conn.execute("UPDATE delivery_orders SET status = 'CANCELLED' WHERE id = ?",
+                 (row["id"],))
+    return {"id": row["id"], "doNumber": row["do_number"], "status": "CANCELLED"}
+
+
+def combinable_groups(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """Houses with no live DO, bucketed by consignee and destination.
+
+    Only buckets with two or more houses are worth showing — those are the
+    consignees who would otherwise be handed several separate release papers.
+    """
+    rows = conn.execute(
+        """SELECT h.id, h.mawb_number, h.hawb_number, h.consignee_name,
+                  h.destination, h.pieces, h.gross_weight, h.weight_unit,
+                  h.commodity
+           FROM fhl_house h
+           WHERE h.consignee_name IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM delivery_order_lines l
+               JOIN delivery_orders d ON d.id = l.do_id
+               WHERE l.fhl_id = h.id AND d.status = 'ACTIVE')
+           ORDER BY h.consignee_name, h.mawb_number, h.hawb_number""").fetchall()
+
+    buckets: dict[tuple, dict] = {}
+    for row in rows:
+        key = (normalise_party(row["consignee_name"]), row["destination"])
+        bucket = buckets.setdefault(key, {
+            "consignee": row["consignee_name"],
+            "destination": row["destination"],
+            "houses": [],
+        })
+        bucket["houses"].append(dict(row))
+
+    groups = [
+        {**bucket,
+         "houseCount": len(bucket["houses"]),
+         "totalPieces": sum(h["pieces"] or 0 for h in bucket["houses"]),
+         "totalWeight": round(
+             sum(float(h["gross_weight"] or 0) for h in bucket["houses"]), 3),
+         "mawbCount": len({h["mawb_number"] for h in bucket["houses"]})}
+        for bucket in buckets.values() if len(bucket["houses"]) > 1
+    ]
+    groups.sort(key=lambda g: g["houseCount"], reverse=True)
+    return groups[:limit]
 
 
 def _json_default(value):
@@ -367,6 +622,16 @@ def _esc(value) -> str:
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
+def doc_lines(ctx: dict) -> list[dict]:
+    """DOs issued before combining existed stored only flat fields."""
+    if ctx.get("lines"):
+        return ctx["lines"]
+    return [{k: ctx.get(k) for k in (
+        "mawbNumber", "mawbPlain", "hawbNumber", "shc", "pieces", "masterPieces",
+        "weight", "masterWeight", "weightUnit", "boardPoint", "offPoint",
+        "flightNumber", "aircraftRegistration", "landedAt", "natureOfGoods")}]
+
+
 def _ctx_dates(ctx: dict) -> tuple:
     """Payloads come back from JSON with ISO strings, fresh ones with datetimes."""
     def coerce(value):
@@ -382,8 +647,36 @@ def render_html(ctx: dict) -> str:
                      (cne.get("address") or "").split("/") if line.strip()]
     last_line = " ".join(x for x in [cne.get("postalCode"), cne.get("country")] if x)
 
-    landed_text = fmt_stamp(landed) if landed else ""
     expiry_text = fmt_stamp(expiry) if expiry else ""
+
+    lines = doc_lines(ctx)
+    # A combined DO covers many houses, so it is identified by its own number.
+    barcode_value = (ctx.get("hawbNumber")
+                     or str(ctx.get("doNumber") or ""))
+    combined = ctx.get("doType") == "COMBINED"
+    rows_html = "".join(f"""<tr>
+      <td>MAWB {_esc(line.get('mawbPlain')
+                     or (line.get('mawbNumber') or '').replace('-', ''))}/<br>
+          HAWB {_esc(line.get('hawbNumber'))}</td>
+      <td class="c">{_esc(line.get('shc'))}</td>
+      <td class="c">{_esc(line.get('pieces'))} of {_esc(line.get('masterPieces'))}</td>
+      <td class="c">{_esc(fmt_weight(line.get('weight')))} of {_esc(fmt_weight(line.get('masterWeight')))}{_esc(line.get('weightUnit'))}</td>
+      <td class="c">{_esc(line.get('boardPoint'))}</td>
+      <td class="c">{_esc(line.get('offPoint'))}</td>
+      <td>{_esc(line.get('flightNumber'))}<br>{_esc(line.get('aircraftRegistration'))}</td>
+      <td class="c nowrap">{_esc(fmt_stamp(_as_dt(line.get('landedAt'))))}</td>
+      <td class="c">{_esc(line.get('natureOfGoods'))}</td>
+    </tr>""" for line in lines)
+
+    # A single-line DO matches the carrier's own layout exactly, which has no
+    # total row; only the combined form needs one.
+    total_html = f"""<tr class="total">
+      <td>รวม {len(lines)} House</td><td></td>
+      <td class="c">{_esc(ctx.get('totalPieces'))}</td>
+      <td class="c">{_esc(fmt_weight(ctx.get('totalWeight')))}{
+        _esc(lines[0].get('weightUnit') if lines else '')}</td>
+      <td colspan="5"></td>
+    </tr>""" if combined else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -433,6 +726,7 @@ def render_html(ctx: dict) -> str:
   table.do td {{ font-size: 11px; height: 42px; }}
   table.do td.c {{ text-align: center; }}
   table.do td.nowrap {{ white-space: nowrap; }}
+  table.do tr.total td {{ font-weight: bold; background: #f2f4f8; }}
   .note {{ margin-bottom: 18px; }}
   .note b {{ display: inline-block; width: 56px; vertical-align: top; }}
   .note .body {{ display: inline-block; width: calc(100% - 60px); line-height: 1.9; font-weight: bold; }}
@@ -459,7 +753,8 @@ def render_html(ctx: dict) -> str:
 <body>
 <div class="toolbar">
   <button onclick="window.print()">🖨 พิมพ์ / บันทึกเป็น PDF</button>
-  <span class="muted">DO {_esc(ctx.get('doNumber'))} · HAWB {_esc(ctx.get('hawbNumber'))}
+  <span class="muted">DO {_esc(ctx.get('doNumber'))} ·
+    {f"รวม {len(lines)} house" if combined else "HAWB " + _esc(ctx.get('hawbNumber'))}
     {'· พิมพ์ซ้ำครั้งที่ ' + str(ctx.get('reprintCount')) if ctx.get('reprintCount') else ''}</span>
 </div>
 
@@ -467,8 +762,8 @@ def render_html(ctx: dict) -> str:
   {'<div class="reprint">REPRINT</div>' if ctx.get("reprintCount") else ''}
 
   <div class="barcode-box">
-    {code39_svg(ctx.get('hawbNumber') or '')}
-    <div class="num">{_esc(ctx.get('hawbNumber'))}</div>
+    {code39_svg(barcode_value)}
+    <div class="num">{_esc(barcode_value)}</div>
   </div>
 
   <div class="head">
@@ -502,17 +797,7 @@ def render_html(ctx: dict) -> str:
       <th style="width:16%">Landed on<br>Date/ATA</th>
       <th style="width:14%">Nature of Goods</th>
     </tr></thead>
-    <tbody><tr>
-      <td>MAWB {_esc(ctx.get('mawbPlain'))}/<br>HAWB {_esc(ctx.get('hawbNumber'))}</td>
-      <td class="c">{_esc(ctx.get('shc'))}</td>
-      <td class="c">{_esc(ctx.get('pieces'))} of {_esc(ctx.get('masterPieces'))}</td>
-      <td class="c">{_esc(fmt_weight(ctx.get('weight')))} of {_esc(fmt_weight(ctx.get('masterWeight')))}{_esc(ctx.get('weightUnit'))}</td>
-      <td class="c">{_esc(ctx.get('boardPoint'))}</td>
-      <td class="c">{_esc(ctx.get('offPoint'))}</td>
-      <td>{_esc(ctx.get('flightNumber'))}<br>{_esc(ctx.get('aircraftRegistration'))}</td>
-      <td class="c nowrap">{_esc(landed_text)}</td>
-      <td class="c">{_esc(ctx.get('natureOfGoods'))}</td>
-    </tr></tbody>
+    <tbody>{rows_html}{total_html}</tbody>
   </table>
 
   <div class="note"><b>Note:</b><span class="body">In case the above details are
@@ -558,11 +843,12 @@ def render_pdf(ctx: dict) -> bytes:
     y = height - 20 * mm
 
     # barcode, right aligned
-    bc = code39.Standard39(str(ctx.get("hawbNumber") or ""), barHeight=13 * mm,
+    barcode_value = str(ctx.get("hawbNumber") or ctx.get("doNumber") or "")
+    bc = code39.Standard39(barcode_value, barHeight=13 * mm,
                            barWidth=0.5 * mm, checksum=0, quiet=0)
     bc.drawOn(c, right - bc.width, y - 13 * mm)
     c.setFont("Helvetica", 8)
-    c.drawRightString(right - 2, y - 18 * mm, str(ctx.get("hawbNumber") or ""))
+    c.drawRightString(right - 2, y - 18 * mm, barcode_value)
     y -= 30 * mm
 
     # header block
@@ -606,14 +892,18 @@ def render_pdf(ctx: dict) -> bytes:
     for share in cols:
         acc += usable * share / total
         xs.append(acc)
+    lines = doc_lines(ctx)
+    combined = ctx.get("doType") == "COMBINED"
     head_h, row_h = 9 * mm, 11 * mm
+    total_h = 6 * mm if combined else 0
+    body_h = row_h * len(lines) + total_h
     top = y
 
     c.setLineWidth(0.7)
-    c.rect(left, top - head_h - row_h, usable, head_h + row_h)
+    c.rect(left, top - head_h - body_h, usable, head_h + body_h)
     c.line(left, top - head_h, right, top - head_h)
     for x in xs[1:-1]:
-        c.line(x, top - head_h - row_h, x, top)
+        c.line(x, top - head_h - body_h, x, top)
 
     c.setFont("Helvetica-Bold", 7.5)
     headers = ["Air Waybill No", "SHC", "Pieces", "Weight", "Brd.|Pnt",
@@ -627,27 +917,52 @@ def render_pdf(ctx: dict) -> bytes:
             ty -= 3.4 * mm
 
     c.setFont("Helvetica", 7.5)
-    body_top = top - head_h - 4 * mm
-    c.drawString(xs[0] + 1.5 * mm, body_top, f"MAWB {ctx.get('mawbPlain')}/")
-    c.drawString(xs[0] + 1.5 * mm, body_top - 3.6 * mm,
-                 f"HAWB {ctx.get('hawbNumber')}")
-    centred = [
-        (1, str(ctx.get("shc") or "")),
-        (2, f"{ctx.get('pieces')} of {ctx.get('masterPieces')}"),
-        (3, f"{fmt_weight(ctx.get('weight'))} of "
-            f"{fmt_weight(ctx.get('masterWeight'))}{ctx.get('weightUnit') or ''}"),
-        (4, str(ctx.get("boardPoint") or "")),
-        (5, str(ctx.get("offPoint") or "")),
-        (7, fmt_stamp(landed) if landed else ""),
-        (8, str(ctx.get("natureOfGoods") or "")),
-    ]
-    for i, value in centred:
-        c.drawCentredString((xs[i] + xs[i + 1]) / 2, body_top, value)
-    c.drawString(xs[6] + 1.5 * mm, body_top, str(ctx.get("flightNumber") or ""))
-    c.drawString(xs[6] + 1.5 * mm, body_top - 3.6 * mm,
-                 str(ctx.get("aircraftRegistration") or ""))
+    for index, line in enumerate(lines):
+        row_top = top - head_h - row_h * index
+        body_top = row_top - 4 * mm
+        if index:                       # separator between combined lines
+            c.setLineWidth(0.3)
+            c.line(left, row_top, right, row_top)
+            c.setLineWidth(0.7)
+        plain = (line.get("mawbPlain")
+                 or (line.get("mawbNumber") or "").replace("-", ""))
+        c.drawString(xs[0] + 1.5 * mm, body_top, f"MAWB {plain}/")
+        c.drawString(xs[0] + 1.5 * mm, body_top - 3.6 * mm,
+                     f"HAWB {line.get('hawbNumber')}")
+        line_landed = _as_dt(line.get("landedAt"))
+        for i, value in [
+            (1, str(line.get("shc") or "")),
+            (2, f"{line.get('pieces')} of {line.get('masterPieces')}"),
+            (3, f"{fmt_weight(line.get('weight'))} of "
+                f"{fmt_weight(line.get('masterWeight'))}"
+                f"{line.get('weightUnit') or ''}"),
+            (4, str(line.get("boardPoint") or "")),
+            (5, str(line.get("offPoint") or "")),
+            (7, fmt_stamp(line_landed) if line_landed else ""),
+            (8, str(line.get("natureOfGoods") or "")),
+        ]:
+            c.drawCentredString((xs[i] + xs[i + 1]) / 2, body_top, value)
+        c.drawString(xs[6] + 1.5 * mm, body_top,
+                     str(line.get("flightNumber") or ""))
+        c.drawString(xs[6] + 1.5 * mm, body_top - 3.6 * mm,
+                     str(line.get("aircraftRegistration") or ""))
 
-    y = top - head_h - row_h - 12 * mm
+    if combined:
+        total_top = top - head_h - row_h * len(lines)
+        c.setLineWidth(0.5)
+        c.line(left, total_top, right, total_top)
+        c.setFont("Helvetica-Bold", 7.5)
+        c.drawString(xs[0] + 1.5 * mm, total_top - 4 * mm,
+                     f"TOTAL {len(lines)} HOUSE")
+        c.drawCentredString((xs[2] + xs[3]) / 2, total_top - 4 * mm,
+                            str(ctx.get("totalPieces") or ""))
+        c.drawCentredString(
+            (xs[3] + xs[4]) / 2, total_top - 4 * mm,
+            f"{fmt_weight(ctx.get('totalWeight'))}"
+            f"{lines[0].get('weightUnit') or '' if lines else ''}")
+        c.setFont("Helvetica", 7.5)
+
+    y = top - head_h - body_h - 12 * mm
 
     carrier = ctx.get("carrierCode") or "the carrier"
     c.setFont("Helvetica-Bold", 8)

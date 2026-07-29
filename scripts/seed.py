@@ -10,6 +10,7 @@ match status to show:
   217-08722687  WAITING_FOR_FHL         (FWB only)
   217-08722688  WAITING_FOR_FWB         (FHL only)
   217-08722689  MATCHED_WITH_TOLERANCE  (weight off by 0.2 KG)
+  217-08722690  MATCHED, 2 houses for one consignee -> combinable into one DO
   invalid_message.txt                   INVALID_FORMAT
 
 Usage: python3 scripts/seed.py [--reset]
@@ -36,6 +37,9 @@ REAL_FILES = ["FWB_21708722685.txt", "FHL_WM26070003.txt",
 DEMO_FILES = ["FWB_21708722686.txt", "FHL_EF26070010.txt", "FHL_EF26070011.txt",
               "FWB_21708722687.txt", "FHL_PL26070020.txt",
               "FWB_21708722689.txt", "FHL_GS26070030.txt",
+              # one consignee with two houses — the case a combined DO exists for
+              "FWB_21708722690.txt", "FHL_UC26070040.txt",
+              "FHL_UC26070041.txt", "FSU_21708722690.txt",
               "invalid_message.txt"]
 
 

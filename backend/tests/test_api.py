@@ -477,6 +477,65 @@ def test_delivery_order_endpoints(client):
     assert audit["total"] >= 1
 
 
+def test_combine_endpoints(client, seeded):
+    """217-08722686 has two houses; they go on one DO if the consignee matches."""
+    detail = client.get("/api/v1/matches/217-08722686").json()
+    ids = [h["id"] for h in detail["houses"]]
+    assert len(ids) == 2
+
+    # different consignees on the demo data, so it needs the admin override
+    blocked = client.post("/api/v1/do/combine", json={"fhlIds": ids})
+    assert blocked.status_code == 400
+    assert blocked.json()["code"] == "DO_NOT_COMBINABLE"
+
+    r = client.post("/api/v1/do/combine", json={
+        "fhlIds": ids, "forceConsignee": True,
+        "reason": "same importer, two trade names"})
+    assert r.status_code == 200
+    do = r.json()
+    assert do["doType"] == "COMBINED"
+    assert len(do["lines"]) == 2
+    assert do["totalPieces"] == 8
+
+    html = client.get(f"/api/v1/do/{do['id']}/preview").text
+    for h in detail["houses"]:
+        assert h["hawb_number"] in html
+
+    listed = client.get("/api/v1/do", params={"search": "217-08722686"}).json()
+    row = next(i for i in listed["items"] if i["do_number"] == do["doNumber"])
+    assert row["do_type"] == "COMBINED"
+    assert row["line_count"] == 2
+    assert row["status"] == "ACTIVE"
+
+    audit = client.get("/api/v1/audit",
+                       params={"eventType": "COMBINE_DELIVERY_ORDER"}).json()
+    assert audit["total"] >= 1
+
+    # cancelling releases the houses again
+    cancelled = client.post(f"/api/v1/do/{do['id']}/cancel",
+                            json={"reason": "test"})
+    assert cancelled.json()["status"] == "CANCELLED"
+
+
+def test_combine_overrides_need_admin(client):
+    operator = as_role("operator")
+    detail = operator.get("/api/v1/matches/217-08722686").json()
+    ids = [h["id"] for h in detail["houses"]]
+    r = operator.post("/api/v1/do/combine",
+                      json={"fhlIds": ids, "forceConsignee": True})
+    assert r.status_code == 403
+    # and only an administrator may void a document
+    listed = operator.get("/api/v1/do").json()["items"]
+    assert operator.post(f"/api/v1/do/{listed[0]['id']}/cancel",
+                         json={"reason": "no"}).status_code == 403
+
+
+def test_combinable_worklist(client, seeded):
+    d = client.get("/api/v1/do/combinable").json()
+    assert isinstance(d["groups"], list)
+    assert all(g["houseCount"] > 1 for g in d["groups"])
+
+
 def test_delivery_order_amend_is_admin_only(client):
     detail = client.get("/api/v1/matches/217-08722685").json()
     fhl_id = detail["houses"][0]["id"]
